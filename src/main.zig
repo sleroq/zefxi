@@ -178,7 +178,7 @@ const TelegramClient = struct {
         writer.print("{{\"@type\":\"openChat\",\"chat_id\":{d}}}", .{chat_id}) catch return;
         
         self.send(buffer.items);
-        print("📂 Opened chat {d} for monitoring\n", .{chat_id});
+        print("Opened chat {d} for monitoring\n", .{chat_id});
     }
 
     pub fn processUpdate(self: *Self, update_json: []const u8) !void {
@@ -260,17 +260,17 @@ const TelegramClient = struct {
                     defer self.allocator.free(last_name);
                     self.registerUser(first_name, last_name);
                 } else if (std.mem.eql(u8, state_name, "authorizationStateReady")) {
-                    print("✅ Authorization successful!\n", .{});
+                    print("Authorization successful!\n", .{});
                     self.is_authorized = true;
                     
                     // Get current user info
                     self.send("{\"@type\":\"getMe\"}");
                     
                     if (self.target_chat_id) |chat_id| {
-                        print("🎯 Monitoring specific chat: {d}\n", .{chat_id});
+                        print("Monitoring specific chat: {d}\n", .{chat_id});
                         self.openSpecificChat(chat_id);
                     } else {
-                        print("📋 Getting all chats...\n", .{});
+                        print("Getting all chats...\n", .{});
                         // Get chats to monitor for messages
                         self.send("{\"@type\":\"getChats\",\"limit\":20}");
                     }
@@ -299,7 +299,7 @@ const TelegramClient = struct {
                 }
             }
             
-            print("📨 NEW MESSAGE RECEIVED!\n", .{});
+            print("NEW MESSAGE RECEIVED!\n", .{});
             print("  Chat ID: {d}\n", .{message_chat_id});
             
             // Get sender info
@@ -320,12 +320,12 @@ const TelegramClient = struct {
                 if (content_obj.get("text")) |text| {
                     const text_obj = text.object;
                     if (text_obj.get("text")) |text_content| {
-                        print("  📝 Text: {s}\n", .{text_content.string});
+                        print("  Text: {s}\n", .{text_content.string});
                     }
                 }
             }
             
-            print("  ─────────────────────────────\n", .{});
+            print("  -----------------------------\n", .{});
         }
     }
 
@@ -352,7 +352,7 @@ const TelegramClient = struct {
     }
 
     fn handleChats(self: *Self, root: std.json.ObjectMap) !void {
-        print("📋 Received chat list\n", .{});
+        print("Received chat list\n", .{});
         if (root.get("chat_ids")) |chat_ids| {
             const chat_array = chat_ids.array;
             print("Found {d} chats, opening them to receive messages...\n", .{chat_array.items.len});
@@ -368,15 +368,15 @@ const TelegramClient = struct {
                 writer.print("{{\"@type\":\"openChat\",\"chat_id\":{d}}}", .{chat_id}) catch continue;
                 
                 self.send(buffer.items);
-                print("📂 Opened chat {d}\n", .{chat_id});
+                print("Opened chat {d}\n", .{chat_id});
                 
                 // Small delay between opening chats
                 std.time.sleep(100 * std.time.ns_per_ms);
             }
             
-            print("✅ All chats opened! You should now receive messages in real-time.\n", .{});
+            print("All chats opened! You should now receive messages in real-time.\n", .{});
         } else {
-            print("❌ No chat_ids found in response\n", .{});
+            print("No chat_ids found in response\n", .{});
         }
     }
 
@@ -384,9 +384,9 @@ const TelegramClient = struct {
         _ = self;
         if (root.get("first_name")) |first_name| {
             if (root.get("username")) |username| {
-                print("👤 Logged in as: {s} (@{s})\n", .{ first_name.string, username.string });
+                print("Logged in as: {s} (@{s})\n", .{ first_name.string, username.string });
             } else {
-                print("👤 Logged in as: {s}\n", .{first_name.string});
+                print("Logged in as: {s}\n", .{first_name.string});
             }
         }
     }
@@ -395,12 +395,12 @@ const TelegramClient = struct {
         _ = self;
         if (root.get("message")) |message| {
             if (root.get("code")) |code| {
-                print("❌ Error {d}: {s}\n", .{ code.integer, message.string });
+                print("Error {d}: {s}\n", .{ code.integer, message.string });
             } else {
-                print("❌ Error: {s}\n", .{message.string});
+                print("Error: {s}\n", .{message.string});
             }
         } else {
-            print("❌ Unknown error occurred\n", .{});
+            print("Unknown error occurred\n", .{});
         }
     }
 
@@ -493,5 +493,5 @@ pub fn main() !void {
     // Run the main event loop
     try client.run();
 
-    print("\n🎉 TDLib client session completed!\n", .{});
+    print("\nTDLib client session completed!\n", .{});
 } 
