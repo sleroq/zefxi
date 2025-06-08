@@ -16,7 +16,7 @@ const BridgeConfig = struct {
     discord_channel_id: Discord.Snowflake,
     discord_webhook_url: []const u8,
     avatar_server_port: u16 = 8080,
-    avatar_files_directory: []const u8 = "tdlib/photos",
+    files_directory: []const u8 = "tdlib",
     avatar_base_url: []const u8 = "http://127.0.0.1:8080",
 };
 
@@ -60,11 +60,11 @@ const Bridge = struct {
             config.debug_mode
         );
         
-        // Create avatar HTTP server
+        // Create file HTTP server
         const avatar_srv = http_server.HttpServer.init(
             allocator,
             config.avatar_server_port,
-            config.avatar_files_directory,
+            config.files_directory,
             config.debug_mode
         );
         
@@ -151,74 +151,201 @@ const Bridge = struct {
                     self.sendRegularDiscordMessage(escaped_message, display_name);
                 };
             },
-            .photo => |image_info| {
-                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): [Photo {d}x{d}]\n", .{ 
-                    chat_id, display_name, user_info.user_id, image_info.width, image_info.height 
+            .attachment => |attachment_info| {
+                const attachment_emoji = attachment_info.getEmoji();
+                const attachment_name = attachment_info.getDisplayName();
+                
+                // Create descriptive message based on attachment type
+                var description_parts = std.ArrayList([]const u8).init(self.allocator);
+                defer description_parts.deinit();
+                
+                description_parts.append(attachment_name) catch |err| {
+                    print("[Bridge] Failed to append attachment name: {}\n", .{err});
+                    return;
+                };
+                
+                if (attachment_info.width) |w| {
+                    if (attachment_info.height) |h| {
+                        const size_str = std.fmt.allocPrint(self.allocator, " ({d}x{d})", .{ w, h }) catch {
+                            print("[Bridge] Failed to format size string\n", .{});
+                            return;
+                        };
+                        defer self.allocator.free(size_str);
+                        description_parts.append(size_str) catch |err| {
+                            print("[Bridge] Failed to append size string: {}\n", .{err});
+                            return;
+                        };
+                    }
+                }
+                
+                if (attachment_info.duration) |d| {
+                    const duration_str = std.fmt.allocPrint(self.allocator, " ({d}s)", .{d}) catch {
+                        print("[Bridge] Failed to format duration string\n", .{});
+                        return;
+                    };
+                    defer self.allocator.free(duration_str);
+                    description_parts.append(duration_str) catch |err| {
+                        print("[Bridge] Failed to append duration string: {}\n", .{err});
+                        return;
+                    };
+                }
+                
+                if (attachment_info.file_size) |size| {
+                    const size_mb = @as(f64, @floatFromInt(size)) / (1024.0 * 1024.0);
+                    if (size_mb >= 1.0) {
+                        const size_str = std.fmt.allocPrint(self.allocator, " ({d:.1} MB)", .{size_mb}) catch {
+                            print("[Bridge] Failed to format size MB string\n", .{});
+                            return;
+                        };
+                        defer self.allocator.free(size_str);
+                        description_parts.append(size_str) catch |err| {
+                            print("[Bridge] Failed to append size MB string: {}\n", .{err});
+                            return;
+                        };
+                    } else {
+                        const size_kb = @as(f64, @floatFromInt(size)) / 1024.0;
+                        const size_str = std.fmt.allocPrint(self.allocator, " ({d:.1} KB)", .{size_kb}) catch {
+                            print("[Bridge] Failed to format size KB string\n", .{});
+                            return;
+                        };
+                        defer self.allocator.free(size_str);
+                        description_parts.append(size_str) catch |err| {
+                            print("[Bridge] Failed to append size KB string: {}\n", .{err});
+                            return;
+                        };
+                    }
+                }
+                
+                const description = std.mem.join(self.allocator, "", description_parts.items) catch {
+                    print("[Bridge] Failed to join description parts\n", .{});
+                    return;
+                };
+                defer self.allocator.free(description);
+                
+                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s} {s}\n", .{ 
+                    chat_id, display_name, user_info.user_id, attachment_emoji, description
                 });
                 
-                if (image_info.url) |image_url| {
-                    // Image is ready, send it to Discord
+                if (attachment_info.url) |attachment_url| {
+                    // Attachment is ready, send it to Discord
                     if (self.config.debug_mode) {
-                        print("[Bridge] 📸 Sending image to Discord: {s}\n", .{image_url});
+                        print("[Bridge] 📁 Sending attachment to Discord: {s}\n", .{attachment_url});
                     }
                     
-                    self.webhook_executor.sendSpoofedMessageWithImage(
-                        null, // No caption
-                        display_name,
-                        user_info.avatar_url,
-                        image_url
-                    ) catch |err| {
-                        print("[Bridge] Image webhook failed: {}, falling back to text message\n", .{err});
-                        const fallback_message = std.fmt.allocPrint(
+                    // For photos, stickers, and animations, use image embed
+                    if (attachment_info.attachment_type == .photo or 
+                        attachment_info.attachment_type == .sticker or 
+                        attachment_info.attachment_type == .animation) {
+                        self.webhook_executor.sendSpoofedMessageWithImage(
+                            null, // No caption
+                            display_name,
+                            user_info.avatar_url,
+                            attachment_url
+                        ) catch |err| {
+                            print("[Bridge] Attachment webhook failed: {}, falling back to text message\n", .{err});
+                            const fallback_message = std.fmt.allocPrint(
+                                self.allocator,
+                                "{s} {s} - {s}",
+                                .{ attachment_emoji, description, attachment_url }
+                            ) catch {
+                                print("[Bridge] Failed to format fallback message\n", .{});
+                                return;
+                            };
+                            defer self.allocator.free(fallback_message);
+                            
+                            self.sendRegularDiscordMessage(fallback_message, display_name);
+                        };
+                    } else {
+                        // For other file types, send as text with link
+                        const message_with_link = std.fmt.allocPrint(
                             self.allocator,
-                            "[Image: {d}x{d}] - {s}",
-                            .{ image_info.width, image_info.height, image_url }
-                        ) catch "[Image]";
-                        defer if (fallback_message.ptr != "[Image]".ptr) self.allocator.free(fallback_message);
+                            "{s} {s}\n{s}",
+                            .{ attachment_emoji, description, attachment_url }
+                        ) catch {
+                            print("[Bridge] Failed to format message with link\n", .{});
+                            return;
+                        };
+                        defer self.allocator.free(message_with_link);
                         
-                        self.sendRegularDiscordMessage(fallback_message, display_name);
-                    };
+                        self.webhook_executor.sendSpoofedMessage(
+                            message_with_link,
+                            display_name,
+                            user_info.avatar_url
+                        ) catch |err| {
+                            print("[Bridge] Attachment webhook failed: {}, falling back to regular message\n", .{err});
+                            self.sendRegularDiscordMessage(message_with_link, display_name);
+                        };
+                    }
                 } else {
-                    // Image is still downloading, wait for it to be ready
-                    print("[Bridge] ⏳ Image still downloading, will send when ready\n", .{});
-                    // TODO: Store pending image message and send when download completes
+                    // Attachment is still downloading, wait for it to be ready
+                    print("[Bridge] ⏳ {s} still downloading, will send when ready\n", .{attachment_name});
                 }
             },
-            .text_with_photo => |text_photo| {
-                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s} [Photo {d}x{d}]\n", .{ 
-                    chat_id, display_name, user_info.user_id, text_photo.text, text_photo.photo.width, text_photo.photo.height 
+            .text_with_attachment => |text_attachment| {
+                const attachment_emoji = text_attachment.attachment.getEmoji();
+                const attachment_name = text_attachment.attachment.getDisplayName();
+                
+                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s} [{s} {s}]\n", .{ 
+                    chat_id, display_name, user_info.user_id, text_attachment.text, attachment_emoji, attachment_name
                 });
                 
                 // Escape Discord markdown characters in the caption
-                const escaped_caption = self.escapeDiscordMarkdown(text_photo.text) catch text_photo.text;
-                defer if (escaped_caption.ptr != text_photo.text.ptr) self.allocator.free(escaped_caption);
+                const escaped_caption = self.escapeDiscordMarkdown(text_attachment.text) catch text_attachment.text;
+                defer if (escaped_caption.ptr != text_attachment.text.ptr) self.allocator.free(escaped_caption);
                 
-                if (text_photo.photo.url) |image_url| {
-                    // Image is ready, send it to Discord with caption
+                if (text_attachment.attachment.url) |attachment_url| {
+                    // Attachment is ready, send it to Discord with caption
                     if (self.config.debug_mode) {
-                        print("[Bridge] 📸 Sending image with caption to Discord: {s}\n", .{image_url});
+                        print("[Bridge] 📁 Sending attachment with caption to Discord: {s}\n", .{attachment_url});
                     }
                     
-                    self.webhook_executor.sendSpoofedMessageWithImage(
-                        escaped_caption,
-                        display_name,
-                        user_info.avatar_url,
-                        image_url
-                    ) catch |err| {
-                        print("[Bridge] Image with caption webhook failed: {}, falling back to text message\n", .{err});
-                        const fallback_message = std.fmt.allocPrint(
+                    // For photos, stickers, and animations, use image embed with caption
+                    if (text_attachment.attachment.attachment_type == .photo or 
+                        text_attachment.attachment.attachment_type == .sticker or 
+                        text_attachment.attachment.attachment_type == .animation) {
+                        self.webhook_executor.sendSpoofedMessageWithImage(
+                            escaped_caption,
+                            display_name,
+                            user_info.avatar_url,
+                            attachment_url
+                        ) catch |err| {
+                            print("[Bridge] Attachment with caption webhook failed: {}, falling back to text message\n", .{err});
+                            const fallback_message = std.fmt.allocPrint(
+                                self.allocator,
+                                "{s}\n{s} {s} - {s}",
+                                .{ escaped_caption, attachment_emoji, attachment_name, attachment_url }
+                            ) catch {
+                                print("[Bridge] Failed to format fallback message with caption\n", .{});
+                                return;
+                            };
+                            defer self.allocator.free(fallback_message);
+                            
+                            self.sendRegularDiscordMessage(fallback_message, display_name);
+                        };
+                    } else {
+                        // For other file types, send caption and link
+                        const message_with_link = std.fmt.allocPrint(
                             self.allocator,
-                            "{s}\n[Image: {d}x{d}] - {s}",
-                            .{ escaped_caption, text_photo.photo.width, text_photo.photo.height, image_url }
-                        ) catch escaped_caption;
-                        defer if (fallback_message.ptr != escaped_caption.ptr) self.allocator.free(fallback_message);
+                            "{s}\n{s} {s}\n{s}",
+                            .{ escaped_caption, attachment_emoji, attachment_name, attachment_url }
+                        ) catch {
+                            print("[Bridge] Failed to format message with link and caption\n", .{});
+                            return;
+                        };
+                        defer self.allocator.free(message_with_link);
                         
-                        self.sendRegularDiscordMessage(fallback_message, display_name);
-                    };
+                        self.webhook_executor.sendSpoofedMessage(
+                            message_with_link,
+                            display_name,
+                            user_info.avatar_url
+                        ) catch |err| {
+                            print("[Bridge] Attachment with caption webhook failed: {}, falling back to regular message\n", .{err});
+                            self.sendRegularDiscordMessage(message_with_link, display_name);
+                        };
+                    }
                 } else {
-                    // Image is still downloading, wait for it to be ready
-                    print("[Bridge] ⏳ Image with caption still downloading, will send when ready\n", .{});
-                    // TODO: Store pending image message with caption and send when download completes
+                    // Attachment is still downloading, wait for it to be ready
+                    print("[Bridge] ⏳ {s} with caption still downloading, will send when ready\n", .{attachment_name});
                 }
             },
         }
@@ -298,9 +425,9 @@ const Bridge = struct {
         print("Telegram Chat ID: {?d}\n", .{self.config.telegram_chat_id});
         print("Discord Channel ID: {s}\n", .{self.config.discord_channel_id});
         print("Webhook Spoofing: Enabled\n", .{});
-        print("Avatar Server Port: {d}\n", .{self.config.avatar_server_port});
-        print("Avatar Files Directory: {s}\n", .{self.config.avatar_files_directory});
-        print("Avatar Base URL: {s}\n", .{self.config.avatar_base_url});
+        print("File Server Port: {d}\n", .{self.config.avatar_server_port});
+        print("Files Directory: {s}\n", .{self.config.files_directory});
+        print("File Base URL: {s}\n", .{self.config.avatar_base_url});
         print("Debug mode: {}\n", .{self.config.debug_mode});
         print("Press Ctrl+C to exit\n\n", .{});
 
@@ -311,8 +438,11 @@ const Bridge = struct {
         // Set up webhook executor in Discord client
         self.discord_client.setWebhookExecutor(self.webhook_executor);
 
-        // Start avatar HTTP server in a separate thread
-        print("[Bridge] Starting avatar HTTP server...\n", .{});
+        // Set up file ID mapping for HTTP server
+        self.avatar_server.setFileIdMapping(&self.telegram_client.file_id_to_path);
+        
+        // Start file HTTP server in a separate thread
+        print("[Bridge] Starting file HTTP server...\n", .{});
         const avatar_server_thread = try std.Thread.spawn(.{}, startAvatarServer, .{&self.avatar_server});
         defer avatar_server_thread.join();
 
@@ -345,7 +475,7 @@ const Bridge = struct {
 
     fn startAvatarServer(server: *http_server.HttpServer) void {
         server.start() catch |err| {
-            print("[Bridge] Avatar server error: {}\n", .{err});
+            print("[Bridge] File server error: {}\n", .{err});
         };
     }
 };

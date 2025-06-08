@@ -57,16 +57,39 @@ pub const UserInfo = struct {
     }
 };
 
-// Structure to hold image information for bridging
-pub const ImageInfo = struct {
+// Attachment types supported by the bridge
+pub const AttachmentType = enum {
+    photo,
+    document,
+    video,
+    audio,
+    voice,
+    video_note,
+    sticker,
+    animation,
+};
+
+// Structure to hold attachment information for bridging
+pub const AttachmentInfo = struct {
     file_id: i32,
-    width: i32,
-    height: i32,
-    caption: ?[]const u8,
-    local_path: ?[]const u8,
-    url: ?[]const u8,
+    attachment_type: AttachmentType,
+    width: ?i32 = null,
+    height: ?i32 = null,
+    duration: ?i32 = null,
+    file_size: ?i64 = null,
+    file_name: ?[]const u8 = null,
+    mime_type: ?[]const u8 = null,
+    caption: ?[]const u8 = null,
+    local_path: ?[]const u8 = null,
+    url: ?[]const u8 = null,
     
-    pub fn deinit(self: *ImageInfo, allocator: Allocator) void {
+    pub fn deinit(self: *AttachmentInfo, allocator: Allocator) void {
+        if (self.file_name) |name| {
+            allocator.free(name);
+        }
+        if (self.mime_type) |mime| {
+            allocator.free(mime);
+        }
         if (self.caption) |caption| {
             allocator.free(caption);
         }
@@ -77,25 +100,51 @@ pub const ImageInfo = struct {
             allocator.free(url);
         }
     }
+    
+    pub fn getDisplayName(self: AttachmentInfo) []const u8 {
+        return switch (self.attachment_type) {
+            .photo => "Photo",
+            .document => if (self.file_name) |name| name else "Document",
+            .video => "Video",
+            .audio => "Audio",
+            .voice => "Voice Message",
+            .video_note => "Video Note",
+            .sticker => "Sticker",
+            .animation => "GIF",
+        };
+    }
+    
+    pub fn getEmoji(self: AttachmentInfo) []const u8 {
+        return switch (self.attachment_type) {
+            .photo => "📸",
+            .document => "📄",
+            .video => "🎥",
+            .audio => "🎵",
+            .voice => "🎤",
+            .video_note => "📹",
+            .sticker => "🎭",
+            .animation => "🎞️",
+        };
+    }
 };
 
 // Message content types
 pub const MessageContent = union(enum) {
     text: []const u8,
-    photo: ImageInfo,
-    text_with_photo: struct {
+    attachment: AttachmentInfo,
+    text_with_attachment: struct {
         text: []const u8,
-        photo: ImageInfo,
+        attachment: AttachmentInfo,
     },
 };
 
-// Pending image message for when download completes
-pub const PendingImageMessage = struct {
+// Pending attachment message for when download completes
+pub const PendingAttachmentMessage = struct {
     chat_id: i64,
     user_info: UserInfo,
     content: MessageContent,
     
-    pub fn deinit(self: *PendingImageMessage, allocator: Allocator) void {
+    pub fn deinit(self: *PendingAttachmentMessage, allocator: Allocator) void {
         // Clean up user info
         allocator.free(self.user_info.first_name);
         if (self.user_info.last_name) |lname| {
@@ -110,8 +159,8 @@ pub const PendingImageMessage = struct {
         
         // Clean up content
         switch (self.content) {
-            .photo => |*photo| photo.deinit(allocator),
-            .text_with_photo => |*text_photo| text_photo.photo.deinit(allocator),
+            .attachment => |*attachment| attachment.deinit(allocator),
+            .text_with_attachment => |*text_attachment| text_attachment.attachment.deinit(allocator),
             .text => {},
         }
     }
@@ -134,7 +183,8 @@ pub const TelegramClient = struct {
     my_user_id: ?i64,
     user_cache: std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage),
     pending_requests: std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
-    pending_images: std.HashMap(i32, PendingImageMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
+    pending_images: std.HashMap(i32, PendingAttachmentMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
+    file_id_to_path: std.HashMap(i32, []const u8, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
     
     const Self = @This();
 
@@ -154,7 +204,8 @@ pub const TelegramClient = struct {
             .my_user_id = null,
             .user_cache = std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage).init(allocator),
             .pending_requests = std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .pending_images = std.HashMap(i32, PendingImageMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
+            .pending_images = std.HashMap(i32, PendingAttachmentMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
+            .file_id_to_path = std.HashMap(i32, []const u8, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
         };
     }
 
@@ -194,6 +245,13 @@ pub const TelegramClient = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.pending_images.deinit();
+        
+        // Clean up file ID to path mapping
+        var file_iterator = self.file_id_to_path.iterator();
+        while (file_iterator.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.file_id_to_path.deinit();
     }
 
     pub fn setMessageHandler(self: *Self, ctx: *anyopaque, handler: MessageHandler) void {
@@ -600,83 +658,28 @@ pub const TelegramClient = struct {
                         }
                     } else if (std.mem.eql(u8, type_str, "messagePhoto")) {
                         // Photo message
-                        if (self.config.debug_mode) {
-                            print("[Telegram] 📸 Processing photo message\n", .{});
-                        }
-                        
-                        var caption: ?[]const u8 = null;
-                        if (content_obj.get("caption")) |caption_obj| {
-                            const caption_text_obj = caption_obj.object;
-                            if (caption_text_obj.get("text")) |caption_text| {
-                                caption = caption_text.string;
-                                message_text = caption orelse ""; // For logging purposes
-                            }
-                        }
-                        
-                        if (content_obj.get("photo")) |photo| {
-                            const photo_obj = photo.object;
-                            
-                            // Get the largest photo size
-                            if (photo_obj.get("sizes")) |sizes| {
-                                const sizes_array = sizes.array;
-                                if (sizes_array.items.len > 0) {
-                                    // Get the largest size (last in array)
-                                    const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
-                                    
-                                    if (largest_size.get("photo")) |size_photo| {
-                                        const size_photo_obj = size_photo.object;
-                                        
-                                        var file_id: i32 = 0;
-                                        var width: i32 = 0;
-                                        var height: i32 = 0;
-                                        
-                                        if (size_photo_obj.get("id")) |id| {
-                                            file_id = @as(i32, @intCast(id.integer));
-                                        }
-                                        
-                                        if (largest_size.get("width")) |w| {
-                                            width = @as(i32, @intCast(w.integer));
-                                        }
-                                        
-                                        if (largest_size.get("height")) |h| {
-                                            height = @as(i32, @intCast(h.integer));
-                                        }
-                                        
-                                        const image_info = ImageInfo{
-                                            .file_id = file_id,
-                                            .width = width,
-                                            .height = height,
-                                            .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
-                                            .local_path = null,
-                                            .url = null,
-                                        };
-                                        
-                                        if (caption) |cap| {
-                                            message_content = MessageContent{ .text_with_photo = .{
-                                                .text = cap,
-                                                .photo = image_info,
-                                            }};
-                                        } else {
-                                            message_content = MessageContent{ .photo = image_info };
-                                        }
-                                        
-                                        // Start downloading the image
-                                        const download_extra = try std.fmt.allocPrint(
-                                            self.allocator,
-                                            "image_{d}_{d}_{d}",
-                                            .{ message_chat_id, user_id, file_id }
-                                        );
-                                        defer self.allocator.free(download_extra);
-                                        
-                                        try self.downloadFile(file_id, 32, download_extra);
-                                        
-                                        if (self.config.debug_mode) {
-                                            print("[Telegram] 📥 Started download for image file_id {d} ({d}x{d})\n", .{ file_id, width, height });
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        message_content = try self.parsePhotoMessage(content_obj, &message_text, message_chat_id, user_id);
+                    } else if (std.mem.eql(u8, type_str, "messageDocument")) {
+                        // Document message
+                        message_content = try self.parseDocumentMessage(content_obj, &message_text, message_chat_id, user_id);
+                    } else if (std.mem.eql(u8, type_str, "messageVideo")) {
+                        // Video message
+                        message_content = try self.parseVideoMessage(content_obj, &message_text, message_chat_id, user_id);
+                    } else if (std.mem.eql(u8, type_str, "messageAudio")) {
+                        // Audio message
+                        message_content = try self.parseAudioMessage(content_obj, &message_text, message_chat_id, user_id);
+                    } else if (std.mem.eql(u8, type_str, "messageVoiceNote")) {
+                        // Voice note message
+                        message_content = try self.parseVoiceMessage(content_obj, &message_text, message_chat_id, user_id);
+                    } else if (std.mem.eql(u8, type_str, "messageVideoNote")) {
+                        // Video note message
+                        message_content = try self.parseVideoNoteMessage(content_obj, &message_text, message_chat_id, user_id);
+                    } else if (std.mem.eql(u8, type_str, "messageSticker")) {
+                        // Sticker message
+                        message_content = try self.parseStickerMessage(content_obj, &message_text, message_chat_id, user_id);
+                    } else if (std.mem.eql(u8, type_str, "messageAnimation")) {
+                        // Animation/GIF message
+                        message_content = try self.parseAnimationMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else {
                         // Other message types - treat as text for now
                         if (self.config.debug_mode) {
@@ -698,16 +701,16 @@ pub const TelegramClient = struct {
             if (self.getUserInfo(user_id)) |user_info| {
                 // We have user info, check if we need to wait for image download
                 const should_wait_for_image = switch (message_content.?) {
-                    .photo => |photo| photo.url == null,
-                    .text_with_photo => |text_photo| text_photo.photo.url == null,
+                    .attachment => |attachment| attachment.url == null,
+                    .text_with_attachment => |text_attachment| text_attachment.attachment.url == null,
                     .text => false,
                 };
                 
                 if (should_wait_for_image) {
                     // Store pending image message
                     const file_id = switch (message_content.?) {
-                        .photo => |photo| photo.file_id,
-                        .text_with_photo => |text_photo| text_photo.photo.file_id,
+                        .attachment => |attachment| attachment.file_id,
+                        .text_with_attachment => |text_attachment| text_attachment.attachment.file_id,
                         .text => unreachable,
                     };
                     
@@ -720,7 +723,7 @@ pub const TelegramClient = struct {
                         .avatar_url = if (user_info.avatar_url) |avatar| try self.allocator.dupe(u8, avatar) else null,
                     };
                     
-                    const pending_msg = PendingImageMessage{
+                    const pending_msg = PendingAttachmentMessage{
                         .chat_id = message_chat_id,
                         .user_info = cloned_user,
                         .content = message_content.?,
@@ -758,20 +761,20 @@ pub const TelegramClient = struct {
                 
                 // Check if we need to wait for image download
                 const should_wait_for_image = switch (message_content.?) {
-                    .photo => |photo| photo.url == null,
-                    .text_with_photo => |text_photo| text_photo.photo.url == null,
+                    .attachment => |attachment| attachment.url == null,
+                    .text_with_attachment => |text_attachment| text_attachment.attachment.url == null,
                     .text => false,
                 };
                 
                 if (should_wait_for_image) {
                     // Store pending image message with minimal user info
                     const file_id = switch (message_content.?) {
-                        .photo => |photo| photo.file_id,
-                        .text_with_photo => |text_photo| text_photo.photo.file_id,
+                        .attachment => |attachment| attachment.file_id,
+                        .text_with_attachment => |text_attachment| text_attachment.attachment.file_id,
                         .text => unreachable,
                     };
                     
-                    const pending_msg = PendingImageMessage{
+                    const pending_msg = PendingAttachmentMessage{
                         .chat_id = message_chat_id,
                         .user_info = minimal_user,
                         .content = message_content.?,
@@ -1087,8 +1090,8 @@ pub const TelegramClient = struct {
                                         // Create extra data to identify this download
                                         const download_extra = try std.fmt.allocPrint(
                                             self.allocator,
-                                            "avatar_{d}_{s}",
-                                            .{ user_id, unique_id_str }
+                                            "avatar_{d}_{d}_{s}",
+                                            .{ user_id, file_id, unique_id_str }
                                         );
                                         defer self.allocator.free(download_extra);
                                         
@@ -1129,98 +1132,104 @@ pub const TelegramClient = struct {
             
             // Check if this is an avatar download
             if (std.mem.startsWith(u8, extra_str, "avatar_")) {
-                // Parse user_id from extra string: "avatar_{user_id}_{unique_id}"
+                // Parse user_id and file_id from extra string: "avatar_{user_id}_{file_id}_{unique_id}"
                 var parts = std.mem.splitScalar(u8, extra_str, '_');
                 _ = parts.next(); // skip "avatar"
                 if (parts.next()) |user_id_str| {
-                    const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
-                        print("[Telegram] Failed to parse user ID from file extra: {s}, error: {}\n", .{ user_id_str, err });
-                        return;
-                    };
-                    
-                    if (self.config.debug_mode) {
-                        print("[Telegram] Processing avatar download for user {d}\n", .{user_id});
-                    }
-                    
-                    // Check if file was downloaded successfully
-                    if (root.get("local")) |local| {
-                        const local_obj = local.object;
+                    if (parts.next()) |file_id_str| {
+                        const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
+                            print("[Telegram] Failed to parse user ID from file extra: {s}, error: {}\n", .{ user_id_str, err });
+                            return;
+                        };
                         
-                        if (local_obj.get("is_downloading_completed")) |is_completed| {
-                            if (is_completed.bool) {
-                                if (local_obj.get("path")) |path| {
-                                    const file_path = path.string;
-                                    if (self.config.debug_mode) {
-                                        print("[Telegram] Avatar downloaded successfully: {s}\n", .{file_path});
-                                    }
-                                    
-                                    // Update user cache with local file path
-                                    if (self.user_cache.getPtr(user_id)) |user_info| {
-                                        // Free old avatar URL if it exists
-                                        if (user_info.avatar_url) |old_url| {
-                                            self.allocator.free(old_url);
+                                                const file_id = std.fmt.parseInt(i32, file_id_str, 10) catch |err| {
+                            print("[Telegram] Failed to parse file ID from avatar extra: {s}, error: {}\n", .{ file_id_str, err });
+                            return;
+                        };
+                        
+                        if (self.config.debug_mode) {
+                            print("[Telegram] Processing avatar download for user {d}, file {d}\n", .{ user_id, file_id });
+                        }
+                        
+                        // Check if file was downloaded successfully
+                        if (root.get("local")) |local| {
+                            const local_obj = local.object;
+                            
+                            if (local_obj.get("is_downloading_completed")) |is_completed| {
+                                if (is_completed.bool) {
+                                    if (local_obj.get("path")) |path| {
+                                        const file_path = path.string;
+                                        if (self.config.debug_mode) {
+                                            print("[Telegram] Avatar downloaded successfully: {s}\n", .{file_path});
                                         }
                                         
-                                        // Extract just the filename from the path
-                                        const filename = std.fs.path.basename(file_path);
+                                        // Store file ID to path mapping for HTTP server lookup
+                                        const stored_path = try self.allocator.dupe(u8, file_path);
+                                        try self.file_id_to_path.put(file_id, stored_path);
                                         
-                                        // Create HTTP URL for the avatar server
-                                        const avatar_url = try std.fmt.allocPrint(
-                                            self.allocator,
-                                            "{s}/avatar/{s}",
-                                            .{ self.config.avatar_base_url, filename }
-                                        );
-                                        
-                                        // Set HTTP URL as avatar URL
-                                        user_info.avatar_url = avatar_url;
-                                        
-                                        if (self.config.debug_mode) {
-                                            print("[Telegram] Avatar URL set for user {d}: {s}\n", .{ user_id, avatar_url });
-                                            print("[Telegram] Local file path: {s}\n", .{file_path});
+                                        // Update user cache with avatar URL using file ID
+                                        if (self.user_cache.getPtr(user_id)) |user_info| {
+                                            // Free old avatar URL if it exists
+                                            if (user_info.avatar_url) |old_url| {
+                                                self.allocator.free(old_url);
+                                            }
+                                            
+                                            // Generate URL using file ID instead of filename to prevent collisions
+                                            const avatar_url = try self.generateFileUrl(file_id, file_path);
+                                            
+                                            // Set HTTP URL as avatar URL
+                                            user_info.avatar_url = avatar_url;
+                                            
+                                            if (self.config.debug_mode) {
+                                                print("[Telegram] Avatar URL set for user {d}: {s}\n", .{ user_id, avatar_url });
+                                                print("[Telegram] Local file path: {s}\n", .{file_path});
+                                            }
+                                        } else {
+                                            print("[Telegram] ⚠️  User {d} not found in cache when setting avatar\n", .{user_id});
                                         }
                                     } else {
-                                        print("[Telegram] ⚠️  User {d} not found in cache when setting avatar\n", .{user_id});
+                                        print("[Telegram] ❌ No path found in downloaded file\n", .{});
                                     }
                                 } else {
-                                    print("[Telegram] ❌ No path found in downloaded file\n", .{});
+                                    print("[Telegram] ⏳ Avatar download still in progress for user {d}\n", .{user_id});
                                 }
                             } else {
-                                print("[Telegram] ⏳ Avatar download still in progress for user {d}\n", .{user_id});
+                                print("[Telegram] ❌ No download completion status found\n", .{});
                             }
                         } else {
-                            print("[Telegram] ❌ No download completion status found\n", .{});
+                            print("[Telegram] ❌ No local file info found\n", .{});
                         }
                     } else {
-                        print("[Telegram] ❌ No local file info found\n", .{});
+                        print("[Telegram] ❌ Failed to parse file ID from avatar extra: {s}\n", .{extra_str});
                     }
                 } else {
                     print("[Telegram] ❌ Failed to parse user ID from avatar extra: {s}\n", .{extra_str});
                 }
-            } else if (std.mem.startsWith(u8, extra_str, "image_")) {
-                // Parse image download: "image_{chat_id}_{user_id}_{file_id}"
+            } else if (std.mem.startsWith(u8, extra_str, "attachment_")) {
+                // Parse attachment download: "attachment_{chat_id}_{user_id}_{file_id}"
                 var parts = std.mem.splitScalar(u8, extra_str, '_');
-                _ = parts.next(); // skip "image"
+                _ = parts.next(); // skip "attachment"
                 
                 if (parts.next()) |chat_id_str| {
                     if (parts.next()) |user_id_str| {
                         if (parts.next()) |file_id_str| {
                             const chat_id = std.fmt.parseInt(i64, chat_id_str, 10) catch |err| {
-                                print("[Telegram] Failed to parse chat ID from image extra: {s}, error: {}\n", .{ chat_id_str, err });
+                                print("[Telegram] Failed to parse chat ID from attachment extra: {s}, error: {}\n", .{ chat_id_str, err });
                                 return;
                             };
                             
                             const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
-                                print("[Telegram] Failed to parse user ID from image extra: {s}, error: {}\n", .{ user_id_str, err });
+                                print("[Telegram] Failed to parse user ID from attachment extra: {s}, error: {}\n", .{ user_id_str, err });
                                 return;
                             };
                             
                             const file_id = std.fmt.parseInt(i32, file_id_str, 10) catch |err| {
-                                print("[Telegram] Failed to parse file ID from image extra: {s}, error: {}\n", .{ file_id_str, err });
+                                print("[Telegram] Failed to parse file ID from attachment extra: {s}, error: {}\n", .{ file_id_str, err });
                                 return;
                             };
                             
                             if (self.config.debug_mode) {
-                                print("[Telegram] Processing image download for chat {d}, user {d}, file {d}\n", .{ chat_id, user_id, file_id });
+                                print("[Telegram] Processing attachment download for chat {d}, user {d}, file {d}\n", .{ chat_id, user_id, file_id });
                             }
                             
                             // Check if file was downloaded successfully
@@ -1231,41 +1240,38 @@ pub const TelegramClient = struct {
                                     if (is_completed.bool) {
                                         if (local_obj.get("path")) |path| {
                                             const file_path = path.string;
-                                            print("[Telegram] 📸 Image downloaded successfully: {s}\n", .{file_path});
+                                            print("[Telegram] 📁 Attachment downloaded successfully: {s}\n", .{file_path});
                                             
-                                            // Extract just the filename from the path
-                                            const filename = std.fs.path.basename(file_path);
+                                            // Store file ID to path mapping for HTTP server lookup
+                                            const stored_path = try self.allocator.dupe(u8, file_path);
+                                            try self.file_id_to_path.put(file_id, stored_path);
                                             
-                                            // Create HTTP URL for the image server
-                                            const image_url = try std.fmt.allocPrint(
-                                                self.allocator,
-                                                "{s}/avatar/{s}",
-                                                .{ self.config.avatar_base_url, filename }
-                                            );
-                                            defer self.allocator.free(image_url);
+                                            // Generate URL using file ID instead of filename to prevent collisions
+                                            const attachment_url = try self.generateFileUrl(file_id, file_path);
+                                            defer self.allocator.free(attachment_url);
                                             
-                                            print("[Telegram] 🌐 Image available at: {s}\n", .{image_url});
+                                            print("[Telegram] 🌐 Attachment available at: {s}\n", .{attachment_url});
                                             
                                             // Check if we have a pending message for this file
                                             if (self.pending_images.getPtr(file_id)) |pending_msg| {
-                                                // Update the image URL in the pending message
+                                                // Update the attachment URL in the pending message
                                                 switch (pending_msg.content) {
-                                                    .photo => |*photo| {
-                                                        if (photo.url) |old_url| {
+                                                    .attachment => |*attachment| {
+                                                        if (attachment.url) |old_url| {
                                                             self.allocator.free(old_url);
                                                         }
-                                                        photo.url = try self.allocator.dupe(u8, image_url);
+                                                        attachment.url = try self.allocator.dupe(u8, attachment_url);
                                                     },
-                                                    .text_with_photo => |*text_photo| {
-                                                        if (text_photo.photo.url) |old_url| {
+                                                    .text_with_attachment => |*text_attachment| {
+                                                        if (text_attachment.attachment.url) |old_url| {
                                                             self.allocator.free(old_url);
                                                         }
-                                                        text_photo.photo.url = try self.allocator.dupe(u8, image_url);
+                                                        text_attachment.attachment.url = try self.allocator.dupe(u8, attachment_url);
                                                     },
                                                     .text => unreachable,
                                                 }
                                                 
-                                                // Send the message now that the image is ready
+                                                // Send the message now that the attachment is ready
                                                 if (self.message_handler) |handler| {
                                                     if (self.message_handler_ctx) |ctx| {
                                                         handler(ctx, pending_msg.chat_id, pending_msg.user_info, pending_msg.content);
@@ -1279,7 +1285,7 @@ pub const TelegramClient = struct {
                                                 }
                                                 
                                                 if (self.config.debug_mode) {
-                                                    print("[Telegram] ✅ Sent pending image message to Discord\n", .{});
+                                                    print("[Telegram] ✅ Sent pending attachment message to Discord\n", .{});
                                                 }
                                             } else {
                                                 if (self.config.debug_mode) {
@@ -1287,23 +1293,23 @@ pub const TelegramClient = struct {
                                                 }
                                             }
                                         } else {
-                                            print("[Telegram] ❌ No path found in downloaded image file\n", .{});
+                                            print("[Telegram] ❌ No path found in downloaded attachment file\n", .{});
                                         }
                                     } else {
-                                        print("[Telegram] ⏳ Image download still in progress for file {d}\n", .{file_id});
+                                        print("[Telegram] ⏳ Attachment download still in progress for file {d}\n", .{file_id});
                                     }
                                 } else {
-                                    print("[Telegram] ❌ No download completion status found for image\n", .{});
+                                    print("[Telegram] ❌ No download completion status found for attachment\n", .{});
                                 }
                             } else {
-                                print("[Telegram] ❌ No local file info found for image\n", .{});
+                                print("[Telegram] ❌ No local file info found for attachment\n", .{});
                             }
                         }
                     }
                 }
             } else {
                 if (self.config.debug_mode) {
-                    print("[Telegram] File download not related to avatar or image: {s}\n", .{extra_str});
+                    print("[Telegram] File download not related to avatar or attachment: {s}\n", .{extra_str});
                 }
             }
         } else {
@@ -1359,6 +1365,619 @@ pub const TelegramClient = struct {
         }
         
         return true;
+    }
+
+    // Helper function to determine the correct HTTP endpoint based on file type
+    fn getFileEndpoint(self: *Self, file_path: []const u8) []const u8 {
+        _ = self;
+        
+        // Check file extension to determine endpoint
+        if (std.mem.endsWith(u8, file_path, ".jpg") or 
+           std.mem.endsWith(u8, file_path, ".jpeg") or 
+           std.mem.endsWith(u8, file_path, ".png") or 
+           std.mem.endsWith(u8, file_path, ".gif") or 
+           std.mem.endsWith(u8, file_path, ".webp") or 
+           std.mem.endsWith(u8, file_path, ".bmp") or 
+           std.mem.endsWith(u8, file_path, ".svg")) {
+            return "avatar"; // Images go to /avatar/ endpoint
+        } else if (std.mem.endsWith(u8, file_path, ".mp4") or 
+                  std.mem.endsWith(u8, file_path, ".webm") or 
+                  std.mem.endsWith(u8, file_path, ".avi") or 
+                  std.mem.endsWith(u8, file_path, ".mov") or 
+                  std.mem.endsWith(u8, file_path, ".mp3") or 
+                  std.mem.endsWith(u8, file_path, ".ogg") or 
+                  std.mem.endsWith(u8, file_path, ".wav") or 
+                  std.mem.endsWith(u8, file_path, ".flac")) {
+            return "file"; // Media files go to /file/ endpoint
+        } else {
+            return "files"; // Everything else goes to /files/ endpoint
+        }
+    }
+
+    // Helper function to get file extension from path
+    fn getFileExtension(self: *Self, file_path: []const u8) []const u8 {
+        _ = self;
+        if (std.mem.lastIndexOfScalar(u8, file_path, '.')) |dot_index| {
+            return file_path[dot_index..];
+        }
+        return "";
+    }
+
+    // Helper function to generate URL based on file ID instead of filename
+    fn generateFileUrl(self: *Self, file_id: i32, file_path: []const u8) ![]const u8 {
+        // Get file extension to preserve MIME type detection
+        const extension = self.getFileExtension(file_path);
+        
+        // Determine endpoint based on file type
+        const endpoint = self.getFileEndpoint(file_path);
+        
+        // Generate URL using file ID instead of filename to prevent collisions
+        const url_filename = try std.fmt.allocPrint(
+            self.allocator,
+            "{d}{s}",
+            .{ file_id, extension }
+        );
+        defer self.allocator.free(url_filename);
+        
+        // Create HTTP URL for the file server
+        const url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/{s}/{s}",
+            .{ self.config.avatar_base_url, endpoint, url_filename }
+        );
+        
+        print("[Telegram] 🔗 Generated URL for file_id {d}: {s}\n", .{ file_id, url });
+        
+        return url;
+    }
+
+    // Helper function to extract caption from message content
+    fn extractCaption(self: *Self, content_obj: std.json.ObjectMap) ?[]const u8 {
+        _ = self;
+        if (content_obj.get("caption")) |caption_obj| {
+            const caption_text_obj = caption_obj.object;
+            if (caption_text_obj.get("text")) |caption_text| {
+                return caption_text.string;
+            }
+        }
+        return null;
+    }
+
+    // Helper function to start file download with appropriate prefix
+    fn startFileDownload(self: *Self, file_id: i32, prefix: []const u8, chat_id: i64, user_id: i64) !void {
+        const download_extra = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}_{d}_{d}_{d}",
+            .{ prefix, chat_id, user_id, file_id }
+        );
+        defer self.allocator.free(download_extra);
+        
+        try self.downloadFile(file_id, 32, download_extra);
+        
+        if (self.config.debug_mode) {
+            print("[Telegram] 📥 Started download for {s} file_id {d}\n", .{ prefix, file_id });
+        }
+    }
+
+    fn parsePhotoMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 📸 Processing photo message\n", .{});
+        }
+        
+        const caption = self.extractCaption(content_obj);
+        message_text.* = caption orelse "";
+        
+        if (content_obj.get("photo")) |photo| {
+            const photo_obj = photo.object;
+            
+            // Get the largest photo size
+            if (photo_obj.get("sizes")) |sizes| {
+                const sizes_array = sizes.array;
+                if (sizes_array.items.len > 0) {
+                    // Get the largest size (last in array)
+                    const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
+                    
+                    if (largest_size.get("photo")) |size_photo| {
+                        const size_photo_obj = size_photo.object;
+                        
+                        var file_id: i32 = 0;
+                        var width: i32 = 0;
+                        var height: i32 = 0;
+                        
+                        if (size_photo_obj.get("id")) |id| {
+                            file_id = @as(i32, @intCast(id.integer));
+                        }
+                        
+                        if (largest_size.get("width")) |w| {
+                            width = @as(i32, @intCast(w.integer));
+                        }
+                        
+                        if (largest_size.get("height")) |h| {
+                            height = @as(i32, @intCast(h.integer));
+                        }
+                        
+                        const attachment_info = AttachmentInfo{
+                            .file_id = file_id,
+                            .attachment_type = .photo,
+                            .width = width,
+                            .height = height,
+                            .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                            .local_path = null,
+                            .url = null,
+                        };
+                        
+                        try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+                        
+                        if (caption) |cap| {
+                            return MessageContent{ .text_with_attachment = .{
+                                .text = cap,
+                                .attachment = attachment_info,
+                            }};
+                        } else {
+                            return MessageContent{ .attachment = attachment_info };
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    fn parseDocumentMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 📄 Processing document message\n", .{});
+        }
+        
+        const caption = self.extractCaption(content_obj);
+        message_text.* = caption orelse "";
+        
+        if (content_obj.get("document")) |document| {
+            const document_obj = document.object;
+            
+            var file_id: i32 = 0;
+            var file_name: ?[]const u8 = null;
+            var mime_type: ?[]const u8 = null;
+            var file_size: i64 = 0;
+            
+            if (document_obj.get("document")) |doc_file| {
+                const doc_file_obj = doc_file.object;
+                
+                if (doc_file_obj.get("id")) |id| {
+                    file_id = @as(i32, @intCast(id.integer));
+                }
+                
+                if (doc_file_obj.get("size")) |size| {
+                    file_size = size.integer;
+                }
+            }
+            
+            if (document_obj.get("file_name")) |fname| {
+                file_name = fname.string;
+            }
+            
+            if (document_obj.get("mime_type")) |mime| {
+                mime_type = mime.string;
+            }
+            
+            const attachment_info = AttachmentInfo{
+                .file_id = file_id,
+                .attachment_type = .document,
+                .file_size = file_size,
+                .file_name = if (file_name) |name| try self.allocator.dupe(u8, name) else null,
+                .mime_type = if (mime_type) |mime| try self.allocator.dupe(u8, mime) else null,
+                .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                .local_path = null,
+                .url = null,
+            };
+            
+            try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+            
+            if (caption) |cap| {
+                return MessageContent{ .text_with_attachment = .{
+                    .text = cap,
+                    .attachment = attachment_info,
+                }};
+            } else {
+                return MessageContent{ .attachment = attachment_info };
+            }
+        }
+        return null;
+    }
+
+    fn parseVideoMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 🎥 Processing video message\n", .{});
+        }
+        
+        const caption = self.extractCaption(content_obj);
+        message_text.* = caption orelse "";
+        
+        if (content_obj.get("video")) |video| {
+            const video_obj = video.object;
+            
+            var file_id: i32 = 0;
+            var width: i32 = 0;
+            var height: i32 = 0;
+            var duration: i32 = 0;
+            var file_size: i64 = 0;
+            var file_name: ?[]const u8 = null;
+            var mime_type: ?[]const u8 = null;
+            
+            if (video_obj.get("video")) |video_file| {
+                const video_file_obj = video_file.object;
+                
+                if (video_file_obj.get("id")) |id| {
+                    file_id = @as(i32, @intCast(id.integer));
+                }
+                
+                if (video_file_obj.get("size")) |size| {
+                    file_size = size.integer;
+                }
+            }
+            
+            if (video_obj.get("width")) |w| {
+                width = @as(i32, @intCast(w.integer));
+            }
+            
+            if (video_obj.get("height")) |h| {
+                height = @as(i32, @intCast(h.integer));
+            }
+            
+            if (video_obj.get("duration")) |d| {
+                duration = @as(i32, @intCast(d.integer));
+            }
+            
+            if (video_obj.get("file_name")) |fname| {
+                file_name = fname.string;
+            }
+            
+            if (video_obj.get("mime_type")) |mime| {
+                mime_type = mime.string;
+            }
+            
+            const attachment_info = AttachmentInfo{
+                .file_id = file_id,
+                .attachment_type = .video,
+                .width = width,
+                .height = height,
+                .duration = duration,
+                .file_size = file_size,
+                .file_name = if (file_name) |name| try self.allocator.dupe(u8, name) else null,
+                .mime_type = if (mime_type) |mime| try self.allocator.dupe(u8, mime) else null,
+                .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                .local_path = null,
+                .url = null,
+            };
+            
+            try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+            
+            if (caption) |cap| {
+                return MessageContent{ .text_with_attachment = .{
+                    .text = cap,
+                    .attachment = attachment_info,
+                }};
+            } else {
+                return MessageContent{ .attachment = attachment_info };
+            }
+        }
+        return null;
+    }
+
+    fn parseAudioMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 🎵 Processing audio message\n", .{});
+        }
+        
+        const caption = self.extractCaption(content_obj);
+        message_text.* = caption orelse "";
+        
+        if (content_obj.get("audio")) |audio| {
+            const audio_obj = audio.object;
+            
+            var file_id: i32 = 0;
+            var duration: i32 = 0;
+            var file_size: i64 = 0;
+            var file_name: ?[]const u8 = null;
+            var mime_type: ?[]const u8 = null;
+            
+            if (audio_obj.get("audio")) |audio_file| {
+                const audio_file_obj = audio_file.object;
+                
+                if (audio_file_obj.get("id")) |id| {
+                    file_id = @as(i32, @intCast(id.integer));
+                }
+                
+                if (audio_file_obj.get("size")) |size| {
+                    file_size = size.integer;
+                }
+            }
+            
+            if (audio_obj.get("duration")) |d| {
+                duration = @as(i32, @intCast(d.integer));
+            }
+            
+            if (audio_obj.get("file_name")) |fname| {
+                file_name = fname.string;
+            }
+            
+            if (audio_obj.get("mime_type")) |mime| {
+                mime_type = mime.string;
+            }
+            
+            const attachment_info = AttachmentInfo{
+                .file_id = file_id,
+                .attachment_type = .audio,
+                .duration = duration,
+                .file_size = file_size,
+                .file_name = if (file_name) |name| try self.allocator.dupe(u8, name) else null,
+                .mime_type = if (mime_type) |mime| try self.allocator.dupe(u8, mime) else null,
+                .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                .local_path = null,
+                .url = null,
+            };
+            
+            try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+            
+            if (caption) |cap| {
+                return MessageContent{ .text_with_attachment = .{
+                    .text = cap,
+                    .attachment = attachment_info,
+                }};
+            } else {
+                return MessageContent{ .attachment = attachment_info };
+            }
+        }
+        return null;
+    }
+
+    fn parseVoiceMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 🎤 Processing voice message\n", .{});
+        }
+        
+        const caption = self.extractCaption(content_obj);
+        message_text.* = caption orelse "";
+        
+        if (content_obj.get("voice_note")) |voice| {
+            const voice_obj = voice.object;
+            
+            var file_id: i32 = 0;
+            var duration: i32 = 0;
+            var file_size: i64 = 0;
+            
+            if (voice_obj.get("voice")) |voice_file| {
+                const voice_file_obj = voice_file.object;
+                
+                if (voice_file_obj.get("id")) |id| {
+                    file_id = @as(i32, @intCast(id.integer));
+                }
+                
+                if (voice_file_obj.get("size")) |size| {
+                    file_size = size.integer;
+                }
+            }
+            
+            if (voice_obj.get("duration")) |d| {
+                duration = @as(i32, @intCast(d.integer));
+            }
+            
+            const attachment_info = AttachmentInfo{
+                .file_id = file_id,
+                .attachment_type = .voice,
+                .duration = duration,
+                .file_size = file_size,
+                .mime_type = try self.allocator.dupe(u8, "audio/ogg"),
+                .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                .local_path = null,
+                .url = null,
+            };
+            
+            try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+            
+            if (caption) |cap| {
+                return MessageContent{ .text_with_attachment = .{
+                    .text = cap,
+                    .attachment = attachment_info,
+                }};
+            } else {
+                return MessageContent{ .attachment = attachment_info };
+            }
+        }
+        return null;
+    }
+
+    fn parseVideoNoteMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 📹 Processing video note message\n", .{});
+        }
+        
+        const caption = self.extractCaption(content_obj);
+        message_text.* = caption orelse "";
+        
+        if (content_obj.get("video_note")) |video_note| {
+            const video_note_obj = video_note.object;
+            
+            var file_id: i32 = 0;
+            var duration: i32 = 0;
+            var file_size: i64 = 0;
+            var length: i32 = 0;
+            
+            if (video_note_obj.get("video")) |video_file| {
+                const video_file_obj = video_file.object;
+                
+                if (video_file_obj.get("id")) |id| {
+                    file_id = @as(i32, @intCast(id.integer));
+                }
+                
+                if (video_file_obj.get("size")) |size| {
+                    file_size = size.integer;
+                }
+            }
+            
+            if (video_note_obj.get("duration")) |d| {
+                duration = @as(i32, @intCast(d.integer));
+            }
+            
+            if (video_note_obj.get("length")) |l| {
+                length = @as(i32, @intCast(l.integer));
+            }
+            
+            const attachment_info = AttachmentInfo{
+                .file_id = file_id,
+                .attachment_type = .video_note,
+                .width = length,
+                .height = length,
+                .duration = duration,
+                .file_size = file_size,
+                .mime_type = try self.allocator.dupe(u8, "video/mp4"),
+                .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                .local_path = null,
+                .url = null,
+            };
+            
+            try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+            
+            if (caption) |cap| {
+                return MessageContent{ .text_with_attachment = .{
+                    .text = cap,
+                    .attachment = attachment_info,
+                }};
+            } else {
+                return MessageContent{ .attachment = attachment_info };
+            }
+        }
+        return null;
+    }
+
+    fn parseStickerMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 🎭 Processing sticker message\n", .{});
+        }
+        
+        message_text.* = "";
+        
+        if (content_obj.get("sticker")) |sticker| {
+            const sticker_obj = sticker.object;
+            
+            var file_id: i32 = 0;
+            var width: i32 = 0;
+            var height: i32 = 0;
+            var file_size: i64 = 0;
+            
+            if (sticker_obj.get("sticker")) |sticker_file| {
+                const sticker_file_obj = sticker_file.object;
+                
+                if (sticker_file_obj.get("id")) |id| {
+                    file_id = @as(i32, @intCast(id.integer));
+                }
+                
+                if (sticker_file_obj.get("size")) |size| {
+                    file_size = size.integer;
+                }
+            }
+            
+            if (sticker_obj.get("width")) |w| {
+                width = @as(i32, @intCast(w.integer));
+            }
+            
+            if (sticker_obj.get("height")) |h| {
+                height = @as(i32, @intCast(h.integer));
+            }
+            
+            const attachment_info = AttachmentInfo{
+                .file_id = file_id,
+                .attachment_type = .sticker,
+                .width = width,
+                .height = height,
+                .file_size = file_size,
+                .local_path = null,
+                .url = null,
+            };
+            
+            try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+            
+            return MessageContent{ .attachment = attachment_info };
+        }
+        return null;
+    }
+
+    fn parseAnimationMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
+        if (self.config.debug_mode) {
+            print("[Telegram] 🎞️ Processing animation message\n", .{});
+        }
+        
+        const caption = self.extractCaption(content_obj);
+        message_text.* = caption orelse "";
+        
+        if (content_obj.get("animation")) |animation| {
+            const animation_obj = animation.object;
+            
+            var file_id: i32 = 0;
+            var width: i32 = 0;
+            var height: i32 = 0;
+            var duration: i32 = 0;
+            var file_size: i64 = 0;
+            var file_name: ?[]const u8 = null;
+            var mime_type: ?[]const u8 = null;
+            
+            if (animation_obj.get("animation")) |animation_file| {
+                const animation_file_obj = animation_file.object;
+                
+                if (animation_file_obj.get("id")) |id| {
+                    file_id = @as(i32, @intCast(id.integer));
+                }
+                
+                if (animation_file_obj.get("size")) |size| {
+                    file_size = size.integer;
+                }
+            }
+            
+            if (animation_obj.get("width")) |w| {
+                width = @as(i32, @intCast(w.integer));
+            }
+            
+            if (animation_obj.get("height")) |h| {
+                height = @as(i32, @intCast(h.integer));
+            }
+            
+            if (animation_obj.get("duration")) |d| {
+                duration = @as(i32, @intCast(d.integer));
+            }
+            
+            if (animation_obj.get("file_name")) |fname| {
+                file_name = fname.string;
+            }
+            
+            if (animation_obj.get("mime_type")) |mime| {
+                mime_type = mime.string;
+            }
+            
+            const attachment_info = AttachmentInfo{
+                .file_id = file_id,
+                .attachment_type = .animation,
+                .width = width,
+                .height = height,
+                .duration = duration,
+                .file_size = file_size,
+                .file_name = if (file_name) |name| try self.allocator.dupe(u8, name) else null,
+                .mime_type = if (mime_type) |mime| try self.allocator.dupe(u8, mime) else null,
+                .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                .local_path = null,
+                .url = null,
+            };
+            
+            try self.startFileDownload(file_id, "attachment", chat_id, user_id);
+            
+            if (caption) |cap| {
+                return MessageContent{ .text_with_attachment = .{
+                    .text = cap,
+                    .attachment = attachment_info,
+                }};
+            } else {
+                return MessageContent{ .attachment = attachment_info };
+            }
+        }
+        return null;
     }
 
 
