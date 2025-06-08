@@ -34,7 +34,12 @@
           zigPreferMusl = false;
           
           # Libraries required for runtime
-          zigWrapperLibs = with pkgs; [ tdlib ];
+          zigWrapperLibs = with pkgs; [ tdlib glibc ];
+          
+          # Ensure proper dynamic linking on NixOS
+          zigWrapperArgs = [
+            "--set LD_LIBRARY_PATH ${pkgs.lib.makeLibraryPath [ pkgs.tdlib pkgs.glibc ]}"
+          ];
         };
       in {
         options.services.zefxi = {
@@ -214,7 +219,12 @@
 
       # Libraries required for runtime
       # These packages will be added to the LD_LIBRARY_PATH
-      zigWrapperLibs = attrs.buildInputs or [];
+      zigWrapperLibs = (attrs.buildInputs or []) ++ (with env.pkgs; [ glibc ]);
+      
+      # Ensure proper dynamic linking on NixOS
+      zigWrapperArgs = [
+        "--set LD_LIBRARY_PATH ${env.pkgs.lib.makeLibraryPath ([ env.pkgs.tdlib env.pkgs.glibc ] ++ (attrs.buildInputs or []))}"
+      ];
     });
 
     # For bundling with nix bundle for running outside of nix
