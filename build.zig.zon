@@ -1,0 +1,19 @@
+.{
+    .name = .zefxi,
+    .fingerprint = 0xe66a95d272a0b8ec,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.14.0",
+    
+    .dependencies = .{
+        .discordzig = .{
+            .path = "discord.zig",
+        },
+    },
+    
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+} 

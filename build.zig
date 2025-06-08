@@ -9,11 +9,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .use_llvm = true,
     });
 
     // Link TDLib JSON library
     exe.linkSystemLibrary("tdjson");
-    exe.linkLibC();
+
+    // Add discord.zig dependency
+    const discord_dep = b.dependency("discordzig", .{});
+    exe.root_module.addImport("discord", discord_dep.module("discord.zig"));
 
     b.installArtifact(exe);
 
@@ -31,11 +36,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // Link TDLib for tests too
     unit_tests.linkSystemLibrary("tdjson");
-    unit_tests.linkLibC();
+    unit_tests.root_module.addImport("discord", discord_dep.module("discord.zig"));
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
