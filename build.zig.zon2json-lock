@@ -1,0 +1,17 @@
+{
+  "discordzig-1.0.0-KYtlUwJiCAAEIPpIhalsKsLJiKEyy3mB2d5UGY4RB69n": {
+    "name": "discordzig",
+    "url": "https://git.yuzucchii.xyz/yuzucchii/discord.zig/archive/master.tar.gz",
+    "hash": "sha256-YMH1UrXOVl08IcvigoWah9sBEMOvF2CsGLdtZsNiFuY="
+  },
+  "zlib-0.1.0-AAAAALW6QABbti7dQfKuK0IQb-xdcp3SI8zdTvs5ouUD": {
+    "name": "zlib",
+    "url": "https://git.yuzucchii.xyz/yuzucchii/zlib/archive/master.tar.gz",
+    "hash": "sha256-BfY0jzRbkhLhIdwKEfjiMLjnqfjwO7dDQKwjB4Nrf4U="
+  },
+  "websocket-0.1.0-ZPISdbhVAwCL-zrOIFLKLr6CHtwV92raAnObudtbYQjJ": {
+    "name": "websocket",
+    "url": "https://github.com/karlseguin/websocket.zig/archive/refs/heads/master.zip",
+    "hash": "sha256-2kWi8afAsQC9AwkCgzdBHwlbPOJXuUgiW07M1X7Yeqg="
+  }
+}

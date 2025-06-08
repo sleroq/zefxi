@@ -1,3 +1,0 @@
-[submodule "discord.zig"]
-	path = discord.zig
-	url = https://git.yuzucchii.xyz/yuzucchii/discord.zig.git
