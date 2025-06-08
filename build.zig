@@ -11,6 +11,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Link TDLib JSON library
+    exe.linkSystemLibrary("tdjson");
+    exe.linkLibC();
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -28,6 +32,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Link TDLib for tests too
+    unit_tests.linkSystemLibrary("tdjson");
+    unit_tests.linkLibC();
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
