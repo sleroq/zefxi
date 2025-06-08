@@ -3,17 +3,12 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const c = std.c;
 
+// TDLib C API functions
 extern "c" fn td_create_client_id() c_int;
 extern "c" fn td_send(client_id: c_int, request: [*:0]const u8) void;
 extern "c" fn td_receive(timeout: f64) ?[*:0]const u8;
 extern "c" fn td_execute(request: [*:0]const u8) ?[*:0]const u8;
-extern "c" fn td_set_log_message_callback(max_verbosity_level: c_int, callback: ?*const fn (c_int, [*:0]const u8) callconv(.C) void) void;
 
-extern "c" fn td_json_client_create() ?*anyopaque;
-extern "c" fn td_json_client_send(client: *anyopaque, request: [*:0]const u8) void;
-extern "c" fn td_json_client_receive(client: *anyopaque, timeout: f64) ?[*:0]const u8;
-extern "c" fn td_json_client_execute(client: ?*anyopaque, request: [*:0]const u8) ?[*:0]const u8;
-extern "c" fn td_json_client_destroy(client: *anyopaque) void;
 
 pub const Config = struct {
     database_directory: []const u8 = "tdlib",
@@ -33,12 +28,9 @@ pub const Config = struct {
 pub const TelegramError = error{
     ClientNotInitialized,
     ClientClosed,
-    InvalidState,
     JsonParseError,
-    AllocationError,
 };
 
-// Structure to hold user information for Discord spoofing
 pub const UserInfo = struct {
     user_id: i64,
     first_name: []const u8,
@@ -55,7 +47,6 @@ pub const UserInfo = struct {
     }
 };
 
-// Attachment types supported by the bridge
 pub const AttachmentType = enum {
     photo,
     document,
@@ -67,7 +58,6 @@ pub const AttachmentType = enum {
     animation,
 };
 
-// Structure to hold attachment information for bridging
 pub const AttachmentInfo = struct {
     file_id: i32,
     attachment_type: AttachmentType,
@@ -99,34 +89,9 @@ pub const AttachmentInfo = struct {
         }
     }
     
-    pub fn getDisplayName(self: AttachmentInfo) []const u8 {
-        return switch (self.attachment_type) {
-            .photo => "Photo",
-            .document => if (self.file_name) |name| name else "Document",
-            .video => "Video",
-            .audio => "Audio",
-            .voice => "Voice Message",
-            .video_note => "Video Note",
-            .sticker => "Sticker",
-            .animation => "GIF",
-        };
-    }
-    
-    pub fn getEmoji(self: AttachmentInfo) []const u8 {
-        return switch (self.attachment_type) {
-            .photo => "📸",
-            .document => "📄",
-            .video => "🎥",
-            .audio => "🎵",
-            .voice => "🎤",
-            .video_note => "📹",
-            .sticker => "🎭",
-            .animation => "🎞️",
-        };
-    }
+
 };
 
-// Message content types
 pub const MessageContent = union(enum) {
     text: []const u8,
     attachment: AttachmentInfo,
@@ -136,14 +101,12 @@ pub const MessageContent = union(enum) {
     },
 };
 
-// Pending attachment message for when download completes
-pub const PendingAttachmentMessage = struct {
+const PendingAttachmentMessage = struct {
     chat_id: i64,
     user_info: UserInfo,
     content: MessageContent,
     
-    pub fn deinit(self: *PendingAttachmentMessage, allocator: Allocator) void {
-        // Clean up user info
+    fn deinit(self: *PendingAttachmentMessage, allocator: Allocator) void {
         allocator.free(self.user_info.first_name);
         if (self.user_info.last_name) |lname| {
             allocator.free(lname);
@@ -155,7 +118,6 @@ pub const PendingAttachmentMessage = struct {
             allocator.free(avatar);
         }
         
-        // Clean up content
         switch (self.content) {
             .attachment => |*attachment| attachment.deinit(allocator),
             .text_with_attachment => |*text_attachment| text_attachment.attachment.deinit(allocator),
@@ -164,14 +126,12 @@ pub const PendingAttachmentMessage = struct {
     }
 };
 
-// Pending message for when user info is not yet cached
-pub const PendingUserMessage = struct {
+const PendingUserMessage = struct {
     chat_id: i64,
     user_id: i64,
     content: MessageContent,
     
-    pub fn deinit(self: *PendingUserMessage, allocator: Allocator) void {
-        // Clean up content
+    fn deinit(self: *PendingUserMessage, allocator: Allocator) void {
         switch (self.content) {
             .attachment => |*attachment| attachment.deinit(allocator),
             .text_with_attachment => |*text_attachment| text_attachment.attachment.deinit(allocator),
@@ -196,7 +156,7 @@ pub const TelegramClient = struct {
     message_handler_ctx: ?*anyopaque,
     my_user_id: ?i64,
     user_cache: std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage),
-    pending_requests: std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+
     pending_images: std.HashMap(i32, PendingAttachmentMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
     pending_user_messages: std.ArrayList(PendingUserMessage),
     file_id_to_path: std.HashMap(i32, []const u8, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
@@ -218,7 +178,7 @@ pub const TelegramClient = struct {
             .message_handler_ctx = null,
             .my_user_id = null,
             .user_cache = std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage).init(allocator),
-            .pending_requests = std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+
             .pending_images = std.HashMap(i32, PendingAttachmentMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
             .pending_user_messages = std.ArrayList(PendingUserMessage).init(allocator),
             .file_id_to_path = std.HashMap(i32, []const u8, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
@@ -248,12 +208,7 @@ pub const TelegramClient = struct {
         }
         self.user_cache.deinit();
         
-        // Clean up pending requests
-        var req_iterator = self.pending_requests.iterator();
-        while (req_iterator.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.pending_requests.deinit();
+
         
         // Clean up pending images
         var img_iterator = self.pending_images.iterator();
@@ -321,15 +276,9 @@ pub const TelegramClient = struct {
         }
     }
 
-    pub fn getAvatarLocalPath(self: *Self, user_id: i64) ?[]const u8 {
-        if (self.user_cache.get(user_id)) |user_info| {
-            return user_info.avatar_url;
-        }
-        return null;
-    }
+
 
     pub fn start(self: *Self) !void {
-        // Set log verbosity level
         const log_request = try std.fmt.allocPrintZ(self.allocator, "{{\"@type\":\"setLogVerbosityLevel\",\"new_verbosity_level\":{d}}}", .{self.config.log_verbosity});
         defer self.allocator.free(log_request);
         
@@ -344,7 +293,6 @@ pub const TelegramClient = struct {
             print("Created TDLib client with ID: {d}\n", .{self.client_id});
         }
         
-        // Get TDLib version
         const version_request = "{\"@type\":\"getOption\",\"name\":\"version\"}";
         try self.send(version_request);
     }
@@ -359,7 +307,7 @@ pub const TelegramClient = struct {
         
         self.send_buffer.clearRetainingCapacity();
         try self.send_buffer.appendSlice(request);
-        try self.send_buffer.append(0); // null terminator
+        try self.send_buffer.append(0);
         
         const null_terminated_ptr: [*:0]const u8 = @ptrCast(self.send_buffer.items.ptr);
         td_send(self.client_id, null_terminated_ptr);
@@ -383,8 +331,6 @@ pub const TelegramClient = struct {
         const writer = buffer.writer();
         
         try writer.print("{{\"@type\":\"{s}\"", .{request_type});
-        
-        // Add parameters dynamically based on the struct fields
         inline for (std.meta.fields(@TypeOf(params))) |field| {
             try writer.print(",\"{s}\":", .{field.name});
             const value = @field(params, field.name);
@@ -517,7 +463,6 @@ pub const TelegramClient = struct {
         if (root.get("@type")) |type_value| {
             const update_type = type_value.string;
             
-            // Only show very important updates to reduce noise
             const show_update = self.config.debug_mode and (
                 std.mem.eql(u8, update_type, "updateAuthorizationState") or
                 std.mem.eql(u8, update_type, "updateNewMessage") or
@@ -550,16 +495,13 @@ pub const TelegramClient = struct {
         } else if (std.mem.eql(u8, update_type, "userProfilePhotos")) {
             print("[Telegram] 📸 Received userProfilePhotos update\n", .{});
             try self.handleUserProfilePhotos(root);
-        } else if (std.mem.eql(u8, update_type, "chatPhotos")) {
-            print("[Telegram] 📸 Received chatPhotos update\n", .{});
-            try self.handleChatPhotos(root);
+
         } else if (std.mem.eql(u8, update_type, "file")) {
             print("[Telegram] 📁 Received file update\n", .{});
             try self.handleFile(root);
         } else if (std.mem.eql(u8, update_type, "error")) {
             try self.handleError(root);
         } else {
-            // Log unknown update types when debug mode is on
             if (self.config.debug_mode) {
                 print("[Telegram] 🔍 Unknown update type: {s}\n", .{update_type});
             }
@@ -624,7 +566,6 @@ pub const TelegramClient = struct {
         if (root.get("message")) |message| {
             const msg_obj = message.object;
             
-            // Log message processing if debug mode is enabled
             if (self.config.debug_mode) {
                 print("[Telegram] Processing new message\n", .{});
             }
@@ -634,7 +575,6 @@ pub const TelegramClient = struct {
                 message_chat_id = chat_id.integer;
             }
             
-            // If we're monitoring a specific chat, only show messages from that chat
             if (self.target_chat_id) |target_id| {
                 if (message_chat_id != target_id) {
                     return;
@@ -649,7 +589,6 @@ pub const TelegramClient = struct {
                 }
             }
             
-            // Ignore messages from myself
             if (self.my_user_id) |my_id| {
                 if (user_id == my_id) {
                     if (self.config.debug_mode) {
@@ -659,7 +598,6 @@ pub const TelegramClient = struct {
                 }
             }
             
-            // Parse message content (text, photo, or both)
             var message_content: ?MessageContent = null;
             var message_text: []const u8 = "";
             
@@ -670,7 +608,6 @@ pub const TelegramClient = struct {
                     const type_str = content_type.string;
                     
                     if (std.mem.eql(u8, type_str, "messageText")) {
-                        // Text message
                         if (content_obj.get("text")) |text| {
                             const text_obj = text.object;
                             if (text_obj.get("text")) |text_content| {
@@ -679,31 +616,22 @@ pub const TelegramClient = struct {
                             }
                         }
                     } else if (std.mem.eql(u8, type_str, "messagePhoto")) {
-                        // Photo message
                         message_content = try self.parsePhotoMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else if (std.mem.eql(u8, type_str, "messageDocument")) {
-                        // Document message
                         message_content = try self.parseDocumentMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else if (std.mem.eql(u8, type_str, "messageVideo")) {
-                        // Video message
                         message_content = try self.parseVideoMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else if (std.mem.eql(u8, type_str, "messageAudio")) {
-                        // Audio message
                         message_content = try self.parseAudioMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else if (std.mem.eql(u8, type_str, "messageVoiceNote")) {
-                        // Voice note message
                         message_content = try self.parseVoiceMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else if (std.mem.eql(u8, type_str, "messageVideoNote")) {
-                        // Video note message
                         message_content = try self.parseVideoNoteMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else if (std.mem.eql(u8, type_str, "messageSticker")) {
-                        // Sticker message
                         message_content = try self.parseStickerMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else if (std.mem.eql(u8, type_str, "messageAnimation")) {
-                        // Animation/GIF message
                         message_content = try self.parseAnimationMessage(content_obj, &message_text, message_chat_id, user_id);
                     } else {
-                        // Other message types - treat as text for now
                         if (self.config.debug_mode) {
                             print("[Telegram] 🔍 Unsupported message type: {s}\n", .{type_str});
                         }
@@ -712,16 +640,13 @@ pub const TelegramClient = struct {
                 }
             }
             
-            // Default to empty text if no content was parsed
             if (message_content == null) {
                 message_content = MessageContent{ .text = "" };
             }
             
             print("[Telegram] NEW MESSAGE: Chat {d}, User {d}: {s}\n", .{ message_chat_id, user_id, message_text });
             
-            // Get or request user info
             if (self.getUserInfo(user_id)) |user_info| {
-                // We have user info, check if we need to wait for image download
                 const should_wait_for_image = switch (message_content.?) {
                     .attachment => |attachment| attachment.url == null,
                     .text_with_attachment => |text_attachment| text_attachment.attachment.url == null,
@@ -729,7 +654,6 @@ pub const TelegramClient = struct {
                 };
                 
                 if (should_wait_for_image) {
-                    // Store pending image message
                     const file_id = switch (message_content.?) {
                         .attachment => |attachment| attachment.file_id,
                         .text_with_attachment => |text_attachment| text_attachment.attachment.file_id,
@@ -757,7 +681,6 @@ pub const TelegramClient = struct {
                         print("[Telegram] Stored pending image message for file_id {d}\n", .{file_id});
                     }
                 } else {
-                    // Image is ready or it's a text message, call the handler immediately
                     if (self.message_handler) |handler| {
                         if (self.message_handler_ctx) |ctx| {
                             handler(ctx, message_chat_id, user_info, message_content.?);
@@ -765,14 +688,12 @@ pub const TelegramClient = struct {
                     }
                 }
             } else {
-                // Request user info and queue the message for later processing
                 if (self.config.debug_mode) {
                     print("[Telegram] User info not cached for {d}, requesting info and queueing message...\n", .{user_id});
                 }
                 try self.requestUserInfo(user_id);
                 try self.requestUserProfilePhotos(user_id);
                 
-                // Queue the message to be processed when user info arrives
                 const pending_user_msg = PendingUserMessage{
                     .chat_id = message_chat_id,
                     .user_id = user_id,
@@ -820,14 +741,12 @@ pub const TelegramClient = struct {
             for (chat_array.items) |chat_id_value| {
                 const chat_id = chat_id_value.integer;
                 
-                // Open each chat to receive messages in real-time
                 try self.openSpecificChat(chat_id);
                 
                 if (self.config.debug_mode) {
                     print("[Telegram] Opened chat {d}\n", .{chat_id});
                 }
                 
-                // Small delay between opening chats
                 std.time.sleep(100 * std.time.ns_per_ms);
             }
             
@@ -841,7 +760,6 @@ pub const TelegramClient = struct {
         if (root.get("id")) |id| {
             const user_id = id.integer;
             
-            // Check if this is for ourselves
             if (self.my_user_id == null) {
                 self.my_user_id = user_id;
                 if (self.config.debug_mode) {
@@ -849,7 +767,6 @@ pub const TelegramClient = struct {
                 }
             }
             
-            // Extract user information
             var first_name: []const u8 = "";
             var last_name: ?[]const u8 = null;
             var username: ?[]const u8 = null;
@@ -877,13 +794,12 @@ pub const TelegramClient = struct {
                 }
             }
             
-            // Store user info in cache
             const user_info = UserInfo{
                 .user_id = user_id,
                 .first_name = try self.allocator.dupe(u8, first_name),
                 .last_name = if (last_name) |lname| try self.allocator.dupe(u8, lname) else null,
                 .username = if (username) |uname| try self.allocator.dupe(u8, uname) else null,
-                .avatar_url = null, // Will be set when we get profile photos
+                .avatar_url = null,
             };
             
             try self.user_cache.put(user_id, user_info);
@@ -900,7 +816,6 @@ pub const TelegramClient = struct {
                 }
             }
             
-            // Process any pending messages for this user
             try self.processPendingUserMessages(user_id);
         }
     }
@@ -910,7 +825,6 @@ pub const TelegramClient = struct {
             print("[Telegram] Processing pending messages for user {d}\n", .{user_id});
         }
         
-        // Get the user info from cache
         const user_info = self.user_cache.get(user_id) orelse {
             if (self.config.debug_mode) {
                 print("[Telegram] ⚠️  User {d} not found in cache when processing pending messages\n", .{user_id});
@@ -918,18 +832,14 @@ pub const TelegramClient = struct {
             return;
         };
         
-        // Check if we should wait for avatar download
-        // We wait if user info exists but avatar_url is null (avatar still downloading)
-        // If avatar_url is empty string, it means no avatar exists and we can proceed
         const should_wait_for_avatar = user_info.avatar_url == null;
         if (should_wait_for_avatar) {
             if (self.config.debug_mode) {
                 print("[Telegram] ⏳ Waiting for avatar download for user {d} before processing messages\n", .{user_id});
             }
-            return; // Don't process messages yet, wait for avatar
+            return;
         }
         
-        // Process all pending messages for this user
         var i: usize = 0;
         while (i < self.pending_user_messages.items.len) {
             const pending_msg = &self.pending_user_messages.items[i];
@@ -939,7 +849,6 @@ pub const TelegramClient = struct {
                     print("[Telegram] ✅ Processing queued message from user {d} (with avatar)\n", .{user_id});
                 }
                 
-                // Check if we need to wait for attachment download
                 const should_wait_for_attachment = switch (pending_msg.content) {
                     .attachment => |attachment| attachment.url == null,
                     .text_with_attachment => |text_attachment| text_attachment.attachment.url == null,
@@ -947,14 +856,12 @@ pub const TelegramClient = struct {
                 };
                 
                 if (should_wait_for_attachment) {
-                    // Move to pending images queue
                     const file_id = switch (pending_msg.content) {
                         .attachment => |attachment| attachment.file_id,
                         .text_with_attachment => |text_attachment| text_attachment.attachment.file_id,
                         .text => unreachable,
                     };
                     
-                    // Clone user info for storage
                     const cloned_user = UserInfo{
                         .user_id = user_info.user_id,
                         .first_name = try self.allocator.dupe(u8, user_info.first_name),
@@ -975,7 +882,6 @@ pub const TelegramClient = struct {
                         print("[Telegram] Moved message to pending attachments queue for file_id {d}\n", .{file_id});
                     }
                 } else {
-                    // Message is ready to be sent
                     if (self.message_handler) |handler| {
                         if (self.message_handler_ctx) |ctx| {
                             handler(ctx, pending_msg.chat_id, user_info, pending_msg.content);
@@ -987,13 +893,10 @@ pub const TelegramClient = struct {
                     }
                 }
                 
-                // Remove this message from the pending queue
                 var removed_msg = self.pending_user_messages.swapRemove(i);
-                // Clean up the removed message if it wasn't moved to pending images
                 if (!should_wait_for_attachment) {
                     removed_msg.deinit(self.allocator);
                 }
-                // Don't increment i since we removed an item
             } else {
                 i += 1;
             }
@@ -1047,7 +950,6 @@ pub const TelegramClient = struct {
                             }
                             
                             if (sizes_array.items.len > 0) {
-                                // Get the largest size
                                 const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
                                 if (self.config.debug_mode) {
                                     print("[Telegram] Processing largest size (index {d})\n", .{sizes_array.items.len - 1});
@@ -1127,82 +1029,7 @@ pub const TelegramClient = struct {
         }
     }
 
-    fn handleChatPhotos(self: *Self, root: std.json.ObjectMap) !void {
-        print("[Telegram] 📸 Processing chat photos response\n", .{});
-        
-        if (root.get("@extra")) |extra| {
-            const extra_str = extra.string;
-            print("[Telegram] Chat photos extra: {s}\n", .{extra_str});
-            
-            if (std.mem.startsWith(u8, extra_str, "photos_")) {
-                const user_id_str = extra_str[7..];
-                const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
-                    print("[Telegram] Failed to parse user ID from extra: {s}, error: {}\n", .{ user_id_str, err });
-                    return;
-                };
-                
-                print("[Telegram] Processing chat photos for user {d}\n", .{user_id});
-                
-                if (root.get("photos")) |photos| {
-                    const photos_array = photos.array;
-                    print("[Telegram] Found {d} chat photos for user {d}\n", .{ photos_array.items.len, user_id });
-                    
-                    if (photos_array.items.len > 0) {
-                        // Get the first photo
-                        const first_photo = photos_array.items[0].object;
-                        if (first_photo.get("sizes")) |sizes| {
-                            const sizes_array = sizes.array;
-                            if (sizes_array.items.len > 0) {
-                                // Get the largest size
-                                const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
-                                
-                                if (largest_size.get("photo")) |photo| {
-                                    const photo_obj = photo.object;
-                                    
-                                    if (photo_obj.get("id")) |file_id_value| {
-                                        const file_id = @as(i32, @intCast(file_id_value.integer));
-                                        print("[Telegram] 📥 Starting download for file_id {d} (user {d})\n", .{ file_id, user_id });
-                                        
-                                        // Get unique_id for identification
-                                        var unique_id_str: []const u8 = "unknown";
-                                        if (photo_obj.get("remote")) |remote| {
-                                            const remote_obj = remote.object;
-                                            if (remote_obj.get("unique_id")) |unique_id| {
-                                                unique_id_str = unique_id.string;
-                                            }
-                                        }
-                                        
-                                        // Create extra data to identify this download
-                                        const download_extra = try std.fmt.allocPrint(
-                                            self.allocator,
-                                            "avatar_{d}_{d}_{s}",
-                                            .{ user_id, file_id, unique_id_str }
-                                        );
-                                        defer self.allocator.free(download_extra);
-                                        
-                                        // Download the file with high priority (32 = high priority)
-                                        try self.downloadFile(file_id, 32, download_extra);
-                                        
-                                        print("[Telegram] 📤 Requested download for avatar file_id {d}\n", .{file_id});
-                                    } else {
-                                        print("[Telegram] ❌ No file ID found in photo object\n", .{});
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        print("[Telegram] ❌ User {d} has no chat photos\n", .{user_id});
-                    }
-                } else {
-                    print("[Telegram] ❌ No photos array found in chatPhotos response\n", .{});
-                }
-            } else {
-                print("[Telegram] ❌ Extra string doesn't start with 'photos_': {s}\n", .{extra_str});
-            }
-        } else {
-            print("[Telegram] ❌ No @extra field found in chatPhotos response\n", .{});
-        }
-    }
+
 
     fn handleFile(self: *Self, root: std.json.ObjectMap) !void {
         if (self.config.debug_mode) {
@@ -1215,9 +1042,7 @@ pub const TelegramClient = struct {
                 print("[Telegram] File extra: {s}\n", .{extra_str});
             }
             
-            // Check if this is an avatar download
             if (std.mem.startsWith(u8, extra_str, "avatar_")) {
-                // Parse user_id and file_id from extra string: "avatar_{user_id}_{file_id}_{unique_id}"
                 var parts = std.mem.splitScalar(u8, extra_str, '_');
                 _ = parts.next(); // skip "avatar"
                 if (parts.next()) |user_id_str| {
@@ -1236,7 +1061,6 @@ pub const TelegramClient = struct {
                             print("[Telegram] Processing avatar download for user {d}, file {d}\n", .{ user_id, file_id });
                         }
                         
-                        // Check if file was downloaded successfully
                         if (root.get("local")) |local| {
                             const local_obj = local.object;
                             
@@ -1248,21 +1072,16 @@ pub const TelegramClient = struct {
                                             print("[Telegram] Avatar downloaded successfully: {s}\n", .{file_path});
                                         }
                                         
-                                        // Store file ID to path mapping for HTTP server lookup
                                         const stored_path = try self.allocator.dupe(u8, file_path);
                                         try self.file_id_to_path.put(file_id, stored_path);
                                         
-                                        // Update user cache with avatar URL using file ID
                                         if (self.user_cache.getPtr(user_id)) |user_info| {
-                                            // Free old avatar URL if it exists
                                             if (user_info.avatar_url) |old_url| {
                                                 self.allocator.free(old_url);
                                             }
                                             
-                                            // Generate URL using file ID instead of filename to prevent collisions
                                             const avatar_url = try self.generateFileUrl(file_id, file_path);
                                             
-                                            // Set HTTP URL as avatar URL
                                             user_info.avatar_url = avatar_url;
                                             
                                             if (self.config.debug_mode) {
@@ -1270,7 +1089,6 @@ pub const TelegramClient = struct {
                                                 print("[Telegram] Local file path: {s}\n", .{file_path});
                                             }
                                             
-                                            // Process any pending messages for this user now that avatar is available
                                             try self.processPendingUserMessages(user_id);
                                         } else {
                                             print("[Telegram] ⚠️  User {d} not found in cache when setting avatar\n", .{user_id});
@@ -1294,9 +1112,8 @@ pub const TelegramClient = struct {
                     print("[Telegram] ❌ Failed to parse user ID from avatar extra: {s}\n", .{extra_str});
                 }
             } else if (std.mem.startsWith(u8, extra_str, "attachment_")) {
-                // Parse attachment download: "attachment_{chat_id}_{user_id}_{file_id}"
                 var parts = std.mem.splitScalar(u8, extra_str, '_');
-                _ = parts.next(); // skip "attachment"
+                _ = parts.next();
                 
                 if (parts.next()) |chat_id_str| {
                     if (parts.next()) |user_id_str| {
@@ -1320,7 +1137,6 @@ pub const TelegramClient = struct {
                                 print("[Telegram] Processing attachment download for chat {d}, user {d}, file {d}\n", .{ chat_id, user_id, file_id });
                             }
                             
-                            // Check if file was downloaded successfully
                             if (root.get("local")) |local| {
                                 const local_obj = local.object;
                                 
@@ -1330,19 +1146,15 @@ pub const TelegramClient = struct {
                                             const file_path = path.string;
                                             print("[Telegram] 📁 Attachment downloaded successfully: {s}\n", .{file_path});
                                             
-                                            // Store file ID to path mapping for HTTP server lookup
                                             const stored_path = try self.allocator.dupe(u8, file_path);
                                             try self.file_id_to_path.put(file_id, stored_path);
                                             
-                                            // Generate URL using file ID instead of filename to prevent collisions
                                             const attachment_url = try self.generateFileUrl(file_id, file_path);
                                             defer self.allocator.free(attachment_url);
                                             
                                             print("[Telegram] 🌐 Attachment available at: {s}\n", .{attachment_url});
                                             
-                                            // Check if we have a pending message for this file
                                             if (self.pending_images.getPtr(file_id)) |pending_msg| {
-                                                // Update the attachment URL in the pending message
                                                 switch (pending_msg.content) {
                                                     .attachment => |*attachment| {
                                                         if (attachment.url) |old_url| {
@@ -1359,14 +1171,12 @@ pub const TelegramClient = struct {
                                                     .text => unreachable,
                                                 }
                                                 
-                                                // Send the message now that the attachment is ready
                                                 if (self.message_handler) |handler| {
                                                     if (self.message_handler_ctx) |ctx| {
                                                         handler(ctx, pending_msg.chat_id, pending_msg.user_info, pending_msg.content);
                                                     }
                                                 }
                                                 
-                                                // Remove from pending messages
                                                 if (self.pending_images.fetchRemove(file_id)) |entry| {
                                                     var mutable_entry = entry;
                                                     mutable_entry.value.deinit(self.allocator);
@@ -1431,7 +1241,6 @@ pub const TelegramClient = struct {
     }
 
     pub fn sendMessage(self: *Self, chat_id: i64, text: []const u8) !void {
-        // Build the JSON request manually to avoid complex nested struct issues
         const request = try std.fmt.allocPrint(self.allocator,
             "{{\"@type\":\"sendMessage\",\"chat_id\":{d},\"input_message_content\":{{\"@type\":\"inputMessageText\",\"text\":{{\"@type\":\"formattedText\",\"text\":\"{s}\"}}}}}}",
             .{ chat_id, text }
@@ -1455,11 +1264,9 @@ pub const TelegramClient = struct {
         return true;
     }
 
-    // Helper function to determine the correct HTTP endpoint based on file type
     fn getFileEndpoint(self: *Self, file_path: []const u8) []const u8 {
         _ = self;
         
-        // Check file extension to determine endpoint
         if (std.mem.endsWith(u8, file_path, ".jpg") or 
            std.mem.endsWith(u8, file_path, ".jpeg") or 
            std.mem.endsWith(u8, file_path, ".png") or 
@@ -1467,7 +1274,7 @@ pub const TelegramClient = struct {
            std.mem.endsWith(u8, file_path, ".webp") or 
            std.mem.endsWith(u8, file_path, ".bmp") or 
            std.mem.endsWith(u8, file_path, ".svg")) {
-            return "avatar"; // Images go to /avatar/ endpoint
+            return "avatar";
         } else if (std.mem.endsWith(u8, file_path, ".mp4") or 
                   std.mem.endsWith(u8, file_path, ".webm") or 
                   std.mem.endsWith(u8, file_path, ".avi") or 
@@ -1476,13 +1283,12 @@ pub const TelegramClient = struct {
                   std.mem.endsWith(u8, file_path, ".ogg") or 
                   std.mem.endsWith(u8, file_path, ".wav") or 
                   std.mem.endsWith(u8, file_path, ".flac")) {
-            return "file"; // Media files go to /file/ endpoint
+            return "file";
         } else {
-            return "files"; // Everything else goes to /files/ endpoint
+            return "files";
         }
     }
 
-    // Helper function to get file extension from path
     fn getFileExtension(self: *Self, file_path: []const u8) []const u8 {
         _ = self;
         if (std.mem.lastIndexOfScalar(u8, file_path, '.')) |dot_index| {
@@ -1491,15 +1297,11 @@ pub const TelegramClient = struct {
         return "";
     }
 
-    // Helper function to generate URL based on file ID instead of filename
     fn generateFileUrl(self: *Self, file_id: i32, file_path: []const u8) ![]const u8 {
-        // Get file extension to preserve MIME type detection
         const extension = self.getFileExtension(file_path);
         
-        // Determine endpoint based on file type
         const endpoint = self.getFileEndpoint(file_path);
         
-        // Generate URL using file ID instead of filename to prevent collisions
         const url_filename = try std.fmt.allocPrint(
             self.allocator,
             "{d}{s}",
@@ -1507,7 +1309,6 @@ pub const TelegramClient = struct {
         );
         defer self.allocator.free(url_filename);
         
-        // Create HTTP URL for the file server
         const url = try std.fmt.allocPrint(
             self.allocator,
             "{s}/{s}/{s}",
@@ -1519,7 +1320,6 @@ pub const TelegramClient = struct {
         return url;
     }
 
-    // Helper function to extract caption from message content
     fn extractCaption(self: *Self, content_obj: std.json.ObjectMap) ?[]const u8 {
         _ = self;
         if (content_obj.get("caption")) |caption_obj| {
@@ -1531,7 +1331,6 @@ pub const TelegramClient = struct {
         return null;
     }
 
-    // Helper function to start file download with appropriate prefix
     fn startFileDownload(self: *Self, file_id: i32, prefix: []const u8, chat_id: i64, user_id: i64) !void {
         const download_extra = try std.fmt.allocPrint(
             self.allocator,
@@ -1542,15 +1341,10 @@ pub const TelegramClient = struct {
         
         try self.downloadFile(file_id, 32, download_extra);
         
-        if (self.config.debug_mode) {
-            print("[Telegram] 📥 Started download for {s} file_id {d}\n", .{ prefix, file_id });
-        }
+
     }
 
     fn parsePhotoMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 📸 Processing photo message\n", .{});
-        }
         
         const caption = self.extractCaption(content_obj);
         message_text.* = caption orelse "";
@@ -1558,11 +1352,9 @@ pub const TelegramClient = struct {
         if (content_obj.get("photo")) |photo| {
             const photo_obj = photo.object;
             
-            // Get the largest photo size
             if (photo_obj.get("sizes")) |sizes| {
                 const sizes_array = sizes.array;
                 if (sizes_array.items.len > 0) {
-                    // Get the largest size (last in array)
                     const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
                     
                     if (largest_size.get("photo")) |size_photo| {
@@ -1612,9 +1404,6 @@ pub const TelegramClient = struct {
     }
 
     fn parseDocumentMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 📄 Processing document message\n", .{});
-        }
         
         const caption = self.extractCaption(content_obj);
         message_text.* = caption orelse "";
@@ -1673,9 +1462,6 @@ pub const TelegramClient = struct {
     }
 
     fn parseVideoMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 🎥 Processing video message\n", .{});
-        }
         
         const caption = self.extractCaption(content_obj);
         message_text.* = caption orelse "";
@@ -1752,9 +1538,6 @@ pub const TelegramClient = struct {
     }
 
     fn parseAudioMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 🎵 Processing audio message\n", .{});
-        }
         
         const caption = self.extractCaption(content_obj);
         message_text.* = caption orelse "";
@@ -1819,9 +1602,6 @@ pub const TelegramClient = struct {
     }
 
     fn parseVoiceMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 🎤 Processing voice message\n", .{});
-        }
         
         const caption = self.extractCaption(content_obj);
         message_text.* = caption orelse "";
@@ -1875,9 +1655,6 @@ pub const TelegramClient = struct {
     }
 
     fn parseVideoNoteMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 📹 Processing video note message\n", .{});
-        }
         
         const caption = self.extractCaption(content_obj);
         message_text.* = caption orelse "";
@@ -1938,9 +1715,6 @@ pub const TelegramClient = struct {
     }
 
     fn parseStickerMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 🎭 Processing sticker message\n", .{});
-        }
         
         message_text.* = "";
         
@@ -1990,9 +1764,6 @@ pub const TelegramClient = struct {
     }
 
     fn parseAnimationMessage(self: *Self, content_obj: std.json.ObjectMap, message_text: *[]const u8, chat_id: i64, user_id: i64) !?MessageContent {
-        if (self.config.debug_mode) {
-            print("[Telegram] 🎞️ Processing animation message\n", .{});
-        }
         
         const caption = self.extractCaption(content_obj);
         message_text.* = caption orelse "";

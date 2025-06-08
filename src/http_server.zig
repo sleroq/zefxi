@@ -36,8 +36,6 @@ pub const HttpServer = struct {
         
         while (true) {
             const connection = try net_server.accept();
-            
-            // Handle each connection in a separate thread for better performance
             const thread = try std.Thread.spawn(.{}, handleConnection, .{ self, connection });
             thread.detach();
         }
@@ -75,15 +73,14 @@ pub const HttpServer = struct {
             print("[HTTP] Request: {s}\n", .{target});
         }
         
-        // Parse the request path - support multiple endpoints
         if (std.mem.startsWith(u8, target, "/files/")) {
-            const filename = target[7..]; // Remove "/files/" prefix
+            const filename = target[7..];
             try self.serveFile(request, filename);
         } else if (std.mem.startsWith(u8, target, "/avatar/")) {
-            const filename = target[8..]; // Remove "/avatar/" prefix
+            const filename = target[8..];
             try self.serveFile(request, filename);
         } else if (std.mem.startsWith(u8, target, "/file/")) {
-            const filename = target[6..]; // Remove "/file/" prefix
+            const filename = target[6..];
             try self.serveFile(request, filename);
         } else if (std.mem.eql(u8, target, "/")) {
             try self.serveIndex(request);
@@ -93,22 +90,20 @@ pub const HttpServer = struct {
     }
     
     fn serveFile(self: *Self, request: *std.http.Server.Request, filename: []const u8) !void {
-        // Validate filename to prevent directory traversal (but allow forward slashes for subdirectories)
+        // Security check: prevent directory traversal
         if (std.mem.indexOf(u8, filename, "..") != null or 
             std.mem.indexOf(u8, filename, "\\") != null) {
             try self.serveNotFound(request);
             return;
         }
         
-        // Check if filename is a file ID (numeric filename like "12345.mp4")
         var file_path: []const u8 = undefined;
         var should_free_path = false;
         
-        // Try to parse the filename as a file ID (extract number before extension)
+        // Try to resolve file ID to actual path
         if (std.mem.lastIndexOfScalar(u8, filename, '.')) |dot_index| {
             const id_part = filename[0..dot_index];
             if (std.fmt.parseInt(i32, id_part, 10)) |file_id| {
-                // This is a file ID, look up the actual path
                 if (self.file_id_to_path) |mapping| {
                     if (mapping.get(file_id)) |actual_path| {
                         file_path = actual_path;
@@ -156,7 +151,6 @@ pub const HttpServer = struct {
             print("[HTTP] Serving file: {s}\n", .{file_path});
         }
         
-        // Try to open and read the file
         const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
             if (self.debug_mode) {
                 print("[HTTP] File not found: {s} (error: {})\n", .{ file_path, err });
@@ -172,10 +166,7 @@ pub const HttpServer = struct {
         
         _ = try file.readAll(file_content);
         
-        // Determine content type based on file extension
         const content_type = self.getContentType(filename);
-        
-        // Send response
         try request.respond(file_content, .{
             .status = .ok,
             .extra_headers = &.{
@@ -190,7 +181,7 @@ pub const HttpServer = struct {
     }
     
     fn serveIndex(self: *Self, request: *std.http.Server.Request) !void {
-        const html = 
+        const html_template = 
             \\<!DOCTYPE html>
             \\<html>
             \\<head>
@@ -208,41 +199,41 @@ pub const HttpServer = struct {
             \\    <div class="container">
             \\        <div class="header">
             \\            <h1>📁 Zefxi File Server</h1>
-            \\            <p>Local HTTP server for serving all Telegram files</p>
+            \\            <p>Local HTTP server for serving Telegram files</p>
             \\        </div>
             \\        <div class="info">
             \\            <h3>📋 Usage</h3>
             \\            <p>Files are served through multiple endpoints:</p>
             \\            <div class="url-examples">
-            \\                <p><code>http://127.0.0.1:PORT/avatar/FILENAME</code> - For images/avatars</p>
-            \\                <p><code>http://127.0.0.1:PORT/file/FILENAME</code> - For media files</p>
-            \\                <p><code>http://127.0.0.1:PORT/files/FILENAME</code> - For documents/other files</p>
+            \\                <p><code>http://127.0.0.1:{PORT}/avatar/FILENAME</code> - For images/avatars</p>
+            \\                <p><code>http://127.0.0.1:{PORT}/file/FILENAME</code> - For media files</p>
+            \\                <p><code>http://127.0.0.1:{PORT}/files/FILENAME</code> - For documents/other files</p>
             \\            </div>
             \\            <br>
             \\            <h3>📁 Files Directory</h3>
-            \\            <p><code>FILES_DIR</code></p>
+            \\            <p><code>{FILES_DIR}</code></p>
             \\            <br>
             \\            <h3>🎯 Supported File Types</h3>
             \\            <p>📸 Images: JPEG, PNG, GIF, WebP, SVG, BMP</p>
-            \\            <p>🎥 Videos: MP4, WebM, AVI, MOV, WMV, FLV, MKV</p>
-            \\            <p>🎵 Audio: MP3, OGG, WAV, FLAC, AAC, M4A, Opus</p>
-            \\            <p>📄 Documents: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX</p>
-            \\            <p>📦 Archives: ZIP, RAR, 7Z, TAR, GZ</p>
-            \\            <p>📝 Text: TXT, HTML, CSS, JS, JSON, XML</p>
+            \\            <p>🎥 Videos: MP4, WebM, AVI, MOV</p>
+            \\            <p>🎵 Audio: MP3, OGG, WAV, FLAC</p>
+            \\            <p>📄 Documents: PDF, DOC, TXT, etc.</p>
             \\            <br>
             \\            <h3>🔧 Status</h3>
-            \\            <p>✅ Server is running and ready to serve all file types</p>
+            \\            <p>✅ Server is running and ready to serve files</p>
             \\        </div>
             \\    </div>
             \\</body>
             \\</html>
         ;
         
-        // Replace placeholders
-        const html_with_port = try std.mem.replaceOwned(u8, self.allocator, html, "PORT", try std.fmt.allocPrint(self.allocator, "{d}", .{self.port}));
+        const port_str = try std.fmt.allocPrint(self.allocator, "{d}", .{self.port});
+        defer self.allocator.free(port_str);
+        
+        const html_with_port = try std.mem.replaceOwned(u8, self.allocator, html_template, "{PORT}", port_str);
         defer self.allocator.free(html_with_port);
         
-        const final_html = try std.mem.replaceOwned(u8, self.allocator, html_with_port, "FILES_DIR", self.files_directory);
+        const final_html = try std.mem.replaceOwned(u8, self.allocator, html_with_port, "{FILES_DIR}", self.files_directory);
         defer self.allocator.free(final_html);
         
         try request.respond(final_html, .{
@@ -286,12 +277,6 @@ pub const HttpServer = struct {
             return "video/x-msvideo";
         } else if (std.mem.endsWith(u8, filename, ".mov")) {
             return "video/quicktime";
-        } else if (std.mem.endsWith(u8, filename, ".wmv")) {
-            return "video/x-ms-wmv";
-        } else if (std.mem.endsWith(u8, filename, ".flv")) {
-            return "video/x-flv";
-        } else if (std.mem.endsWith(u8, filename, ".mkv")) {
-            return "video/x-matroska";
         }
         
         // Audio
@@ -318,18 +303,7 @@ pub const HttpServer = struct {
             return "application/msword";
         } else if (std.mem.endsWith(u8, filename, ".docx")) {
             return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-        } else if (std.mem.endsWith(u8, filename, ".xls")) {
-            return "application/vnd.ms-excel";
-        } else if (std.mem.endsWith(u8, filename, ".xlsx")) {
-            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-        } else if (std.mem.endsWith(u8, filename, ".ppt")) {
-            return "application/vnd.ms-powerpoint";
-        } else if (std.mem.endsWith(u8, filename, ".pptx")) {
-            return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-        }
-        
-        // Text files
-        else if (std.mem.endsWith(u8, filename, ".txt")) {
+        } else if (std.mem.endsWith(u8, filename, ".txt")) {
             return "text/plain";
         } else if (std.mem.endsWith(u8, filename, ".html") or std.mem.endsWith(u8, filename, ".htm")) {
             return "text/html";

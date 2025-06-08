@@ -53,14 +53,12 @@ const Bridge = struct {
             config.debug_mode
         );
         
-        // Create webhook executor (now required)
         const webhook_exec = discord.WebhookExecutor.init(
             allocator, 
             config.discord_webhook_url, 
             config.debug_mode
         );
         
-        // Create file HTTP server
         const avatar_srv = http_server.HttpServer.init(
             allocator,
             config.avatar_server_port,
@@ -84,7 +82,6 @@ const Bridge = struct {
     }
 
     fn escapeDiscordMarkdown(self: *Self, text: []const u8) ![]const u8 {
-        // Simple escape for Discord markdown characters
         var result = std.ArrayList(u8).init(self.allocator);
         defer result.deinit();
         
@@ -104,196 +101,165 @@ const Bridge = struct {
     fn onTelegramMessage(ctx: *anyopaque, chat_id: i64, user_info: telegram.UserInfo, content: telegram.MessageContent) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         
-        // Get user display name
         const display_name = user_info.getDisplayName(self.allocator) catch {
             print("[Bridge] Failed to get display name for user {d}\n", .{user_info.user_id});
             return;
         };
         defer self.allocator.free(display_name);
         
-        // Debug user info
         if (self.config.debug_mode) {
-            print("[Bridge] 🔍 User info debug:\n", .{});
-            print("[Bridge]   - user_id: {d}\n", .{user_info.user_id});
-            print("[Bridge]   - first_name: {s}\n", .{user_info.first_name});
-            print("[Bridge]   - last_name: {?s}\n", .{user_info.last_name});
-            print("[Bridge]   - username: {?s}\n", .{user_info.username});
-            print("[Bridge]   - avatar_url: {?s}\n", .{user_info.avatar_url});
+            print("[Bridge] Processing message from user {s} ({d})\n", .{ display_name, user_info.user_id });
         }
         
         switch (content) {
             .text => |message_text| {
-                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s}\n", .{ 
-                    chat_id, display_name, user_info.user_id, message_text 
-                });
-                
-                // Skip empty messages
-                if (message_text.len == 0) {
-                    return;
-                }
-                
-                // Escape Discord markdown characters in the message
-                const escaped_message = self.escapeDiscordMarkdown(message_text) catch message_text;
-                defer if (escaped_message.ptr != message_text.ptr) self.allocator.free(escaped_message);
-                
-                // Use webhook spoofing for text messages
-                if (self.config.debug_mode) {
-                    print("[Bridge] Using webhook spoofing for text message from user: {s}\n", .{display_name});
-                }
-                
-                self.webhook_executor.sendSpoofedMessage(
-                    escaped_message,
-                    display_name,
-                    user_info.avatar_url
-                ) catch |err| {
-                    print("[Bridge] Webhook failed: {}, falling back to regular message\n", .{err});
-                    // Fallback to regular Discord API
-                    self.sendRegularDiscordMessage(escaped_message, display_name);
-                };
+                self.handleTextMessage(chat_id, display_name, user_info, message_text);
             },
             .attachment => |attachment_info| {
-                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): [attachment]\n", .{ 
-                    chat_id, display_name, user_info.user_id
-                });
-                
-                if (attachment_info.url) |attachment_url| {
-                    // Attachment is ready, send it to Discord
-                    if (self.config.debug_mode) {
-                        print("[Bridge] 📁 Sending attachment to Discord: {s}\n", .{attachment_url});
-                    }
-                    
-                    // Handle different attachment types appropriately for Discord
-                    if (attachment_info.attachment_type == .photo) {
-                        // Photos use image embeds
-                        self.webhook_executor.sendSpoofedMessageWithImage(
-                            null, // No caption
-                            display_name,
-                            user_info.avatar_url,
-                            attachment_url
-                        ) catch |err| {
-                            print("[Bridge] Photo webhook failed: {}, falling back to text message\n", .{err});
-                            self.sendRegularDiscordMessage(attachment_url, display_name);
-                        };
-                    } else if (attachment_info.attachment_type == .sticker or 
-                               attachment_info.attachment_type == .animation) {
-                        // Stickers and animations need URL in content for proper Discord auto-embedding
-                        self.webhook_executor.sendSpoofedMessageWithAnimation(
-                            null, // No caption
-                            display_name,
-                            user_info.avatar_url,
-                            attachment_url
-                        ) catch |err| {
-                            print("[Bridge] Animation webhook failed: {}, falling back to text message\n", .{err});
-                            self.sendRegularDiscordMessage(attachment_url, display_name);
-                        };
-                    } else {
-                        // For other file types, send just the URL
-                        self.webhook_executor.sendSpoofedMessage(
-                            attachment_url,
-                            display_name,
-                            user_info.avatar_url
-                        ) catch |err| {
-                            print("[Bridge] Attachment webhook failed: {}, falling back to regular message\n", .{err});
-                            self.sendRegularDiscordMessage(attachment_url, display_name);
-                        };
-                    }
-                } else {
-                    // Attachment is still downloading, wait for it to be ready
-                    print("[Bridge] ⏳ Attachment still downloading, will send when ready\n", .{});
-                }
+                self.handleAttachmentMessage(chat_id, display_name, user_info, attachment_info);
             },
             .text_with_attachment => |text_attachment| {
-                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s} [attachment]\n", .{ 
-                    chat_id, display_name, user_info.user_id, text_attachment.text
-                });
-                
-                // Escape Discord markdown characters in the caption
-                const escaped_caption = self.escapeDiscordMarkdown(text_attachment.text) catch text_attachment.text;
-                defer if (escaped_caption.ptr != text_attachment.text.ptr) self.allocator.free(escaped_caption);
-                
-                if (text_attachment.attachment.url) |attachment_url| {
-                    // Attachment is ready, send it to Discord with caption
-                    if (self.config.debug_mode) {
-                        print("[Bridge] 📁 Sending attachment with caption to Discord: {s}\n", .{attachment_url});
-                    }
-                    
-                    // Handle different attachment types appropriately for Discord with captions
-                    if (text_attachment.attachment.attachment_type == .photo) {
-                        // Photos use image embeds with caption
-                        self.webhook_executor.sendSpoofedMessageWithImage(
-                            escaped_caption,
-                            display_name,
-                            user_info.avatar_url,
-                            attachment_url
-                        ) catch |err| {
-                            print("[Bridge] Photo with caption webhook failed: {}, falling back to text message\n", .{err});
-                            const fallback_message = std.fmt.allocPrint(
-                                self.allocator,
-                                "{s}\n{s}",
-                                .{ escaped_caption, attachment_url }
-                            ) catch {
-                                print("[Bridge] Failed to format fallback message with caption\n", .{});
-                                return;
-                            };
-                            defer self.allocator.free(fallback_message);
-                            
-                            self.sendRegularDiscordMessage(fallback_message, display_name);
-                        };
-                    } else if (text_attachment.attachment.attachment_type == .sticker or 
-                               text_attachment.attachment.attachment_type == .animation) {
-                        // Stickers and animations need URL in content with caption for proper Discord auto-embedding
-                        self.webhook_executor.sendSpoofedMessageWithAnimation(
-                            escaped_caption,
-                            display_name,
-                            user_info.avatar_url,
-                            attachment_url
-                        ) catch |err| {
-                            print("[Bridge] Animation with caption webhook failed: {}, falling back to text message\n", .{err});
-                            const fallback_message = std.fmt.allocPrint(
-                                self.allocator,
-                                "{s}\n{s}",
-                                .{ escaped_caption, attachment_url }
-                            ) catch {
-                                print("[Bridge] Failed to format fallback message with caption\n", .{});
-                                return;
-                            };
-                            defer self.allocator.free(fallback_message);
-                            
-                            self.sendRegularDiscordMessage(fallback_message, display_name);
-                        };
-                    } else {
-                        // For other file types, send caption and link
-                        const message_with_link = std.fmt.allocPrint(
-                            self.allocator,
-                            "{s}\n{s}",
-                            .{ escaped_caption, attachment_url }
-                        ) catch {
-                            print("[Bridge] Failed to format message with link and caption\n", .{});
-                            return;
-                        };
-                        defer self.allocator.free(message_with_link);
-                        
-                        self.webhook_executor.sendSpoofedMessage(
-                            message_with_link,
-                            display_name,
-                            user_info.avatar_url
-                        ) catch |err| {
-                            print("[Bridge] Attachment with caption webhook failed: {}, falling back to regular message\n", .{err});
-                            self.sendRegularDiscordMessage(message_with_link, display_name);
-                        };
-                    }
-                } else {
-                    // Attachment is still downloading, wait for it to be ready
-                    print("[Bridge] ⏳ Attachment with caption still downloading, will send when ready\n", .{});
-                }
+                self.handleTextWithAttachmentMessage(chat_id, display_name, user_info, text_attachment.text, text_attachment.attachment);
             },
         }
     }
 
-    fn sendRegularDiscordMessage(self: *Self, message_text: []const u8, sender_name: []const u8) void {
-        const channel_id = self.config.discord_channel_id;
+    fn handleTextMessage(self: *Self, chat_id: i64, display_name: []const u8, user_info: telegram.UserInfo, message_text: []const u8) void {
+        print("[Bridge] Telegram -> Discord: Chat {d}, User {s}: {s}\n", .{ chat_id, display_name, message_text });
         
-        // Format message with sender name
+        if (message_text.len == 0) return;
+        
+        const escaped_message = self.escapeDiscordMarkdown(message_text) catch message_text;
+        defer if (escaped_message.ptr != message_text.ptr) self.allocator.free(escaped_message);
+        
+        self.webhook_executor.sendSpoofedMessage(
+            escaped_message,
+            display_name,
+            user_info.avatar_url
+        ) catch |err| {
+            print("[Bridge] Webhook failed: {}, falling back to regular message\n", .{err});
+            self.sendRegularDiscordMessage(escaped_message, display_name);
+        };
+    }
+
+    fn handleAttachmentMessage(self: *Self, chat_id: i64, display_name: []const u8, user_info: telegram.UserInfo, attachment_info: telegram.AttachmentInfo) void {
+        print("[Bridge] Telegram -> Discord: Chat {d}, User {s}: [attachment]\n", .{ chat_id, display_name });
+        
+        if (attachment_info.url) |attachment_url| {
+            if (self.config.debug_mode) {
+                print("[Bridge] Sending attachment to Discord: {s}\n", .{attachment_url});
+            }
+            
+            switch (attachment_info.attachment_type) {
+                .photo => {
+                    self.webhook_executor.sendSpoofedMessageWithImage(
+                        null,
+                        display_name,
+                        user_info.avatar_url,
+                        attachment_url
+                    ) catch |err| {
+                        print("[Bridge] Photo webhook failed: {}, falling back\n", .{err});
+                        self.sendRegularDiscordMessage(attachment_url, display_name);
+                    };
+                },
+                .sticker, .animation => {
+                    self.webhook_executor.sendSpoofedMessageWithAnimation(
+                        null,
+                        display_name,
+                        user_info.avatar_url,
+                        attachment_url
+                    ) catch |err| {
+                        print("[Bridge] Animation webhook failed: {}, falling back\n", .{err});
+                        self.sendRegularDiscordMessage(attachment_url, display_name);
+                    };
+                },
+                else => {
+                    self.webhook_executor.sendSpoofedMessage(
+                        attachment_url,
+                        display_name,
+                        user_info.avatar_url
+                    ) catch |err| {
+                        print("[Bridge] Attachment webhook failed: {}, falling back\n", .{err});
+                        self.sendRegularDiscordMessage(attachment_url, display_name);
+                    };
+                },
+            }
+        } else {
+            print("[Bridge] Attachment still downloading, will send when ready\n", .{});
+        }
+    }
+
+    fn handleTextWithAttachmentMessage(self: *Self, chat_id: i64, display_name: []const u8, user_info: telegram.UserInfo, text: []const u8, attachment: telegram.AttachmentInfo) void {
+        print("[Bridge] Telegram -> Discord: Chat {d}, User {s}: {s} [attachment]\n", .{ chat_id, display_name, text });
+        
+        const escaped_caption = self.escapeDiscordMarkdown(text) catch text;
+        defer if (escaped_caption.ptr != text.ptr) self.allocator.free(escaped_caption);
+        
+        if (attachment.url) |attachment_url| {
+            switch (attachment.attachment_type) {
+                .photo => {
+                    self.webhook_executor.sendSpoofedMessageWithImage(
+                        escaped_caption,
+                        display_name,
+                        user_info.avatar_url,
+                        attachment_url
+                    ) catch |err| {
+                        print("[Bridge] Photo with caption webhook failed: {}\n", .{err});
+                        self.sendFallbackMessage(escaped_caption, attachment_url, display_name);
+                    };
+                },
+                .sticker, .animation => {
+                    self.webhook_executor.sendSpoofedMessageWithAnimation(
+                        escaped_caption,
+                        display_name,
+                        user_info.avatar_url,
+                        attachment_url
+                    ) catch |err| {
+                        print("[Bridge] Animation with caption webhook failed: {}\n", .{err});
+                        self.sendFallbackMessage(escaped_caption, attachment_url, display_name);
+                    };
+                },
+                else => {
+                    const message_with_link = std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}\n{s}",
+                        .{ escaped_caption, attachment_url }
+                    ) catch {
+                        print("[Bridge] Failed to format message with link and caption\n", .{});
+                        return;
+                    };
+                    defer self.allocator.free(message_with_link);
+                    
+                    self.webhook_executor.sendSpoofedMessage(
+                        message_with_link,
+                        display_name,
+                        user_info.avatar_url
+                    ) catch |err| {
+                        print("[Bridge] Attachment with caption webhook failed: {}\n", .{err});
+                        self.sendRegularDiscordMessage(message_with_link, display_name);
+                    };
+                },
+            }
+        } else {
+            print("[Bridge] Attachment with caption still downloading, will send when ready\n", .{});
+        }
+    }
+
+    fn sendFallbackMessage(self: *Self, caption: []const u8, attachment_url: []const u8, display_name: []const u8) void {
+        const fallback_message = std.fmt.allocPrint(
+            self.allocator,
+            "{s}\n{s}",
+            .{ caption, attachment_url }
+        ) catch {
+            print("[Bridge] Failed to format fallback message with caption\n", .{});
+            return;
+        };
+        defer self.allocator.free(fallback_message);
+        
+        self.sendRegularDiscordMessage(fallback_message, display_name);
+    }
+
+    fn sendRegularDiscordMessage(self: *Self, message_text: []const u8, sender_name: []const u8) void {
         const formatted_message = std.fmt.allocPrint(
             self.allocator,
             "**{s}**: {s}",
@@ -304,40 +270,34 @@ const Bridge = struct {
         };
         defer self.allocator.free(formatted_message);
         
-        var result = self.discord_client.session.api.sendMessage(channel_id, .{
+        var result = self.discord_client.session.api.sendMessage(self.config.discord_channel_id, .{
             .content = formatted_message,
         }) catch |err| {
             print("[Bridge] Failed to send message to Discord: {}\n", .{err});
             return;
         };
-
         defer result.deinit();
 
-        const m = result.value.unwrap();
         if (self.config.debug_mode) {
-            std.debug.print("[Bridge] Sent to Discord: {?s}\n", .{m.content});
+            const m = result.value.unwrap();
+            print("[Bridge] Sent to Discord: {?s}\n", .{m.content});
         }
     }
 
-    fn onDiscordMessage(ctx: *anyopaque, channel_id: []const u8, user_id: []const u8, username: []const u8, message_text: []const u8) void {
+    fn onDiscordMessage(ctx: *anyopaque, channel_id: []const u8, _: []const u8, username: []const u8, message_text: []const u8) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        print("[Bridge] Discord -> Telegram: Channel {s}, User {s} ({s}): {s}\n", .{ channel_id, username, user_id, message_text });
+        print("[Bridge] Discord -> Telegram: Channel {s}, User {s}: {s}\n", .{ channel_id, username, message_text });
         
-        // Skip empty messages
-        if (message_text.len == 0) {
-            return;
-        }
+        if (message_text.len == 0) return;
         
-        // Skip messages that look like they came from our webhook (to avoid loops)
-        // Check if message starts with ** (markdown bold) which indicates it's from our regular fallback
+        // Skip messages that appear to be from bridge fallback
         if (std.mem.startsWith(u8, message_text, "**")) {
             if (self.config.debug_mode) {
-                print("[Bridge] Skipping message that appears to be from bridge fallback\n", .{});
+                print("[Bridge] Skipping bridge fallback message\n", .{});
             }
             return;
         }
         
-        // Forward to Telegram if we have a target chat
         if (self.config.telegram_chat_id) |chat_id| {
             const formatted_message = std.fmt.allocPrint(
                 self.allocator, 
@@ -349,10 +309,8 @@ const Bridge = struct {
             };
             defer self.allocator.free(formatted_message);
             
-            // Handle error to return void
             self.telegram_client.sendMessage(chat_id, formatted_message) catch |err| {
                 print("[Bridge] Failed to send message to Telegram: {}\n", .{err});
-                return;
             };
         } else {
             print("[Bridge] No Telegram chat configured, message not forwarded\n", .{});
@@ -360,48 +318,36 @@ const Bridge = struct {
     }
 
     pub fn start(self: *Self) !void {
-        print("\n=== Starting Zefxi Bridge with User Spoofing ===\n", .{});
+        print("\n=== Starting Zefxi Bridge ===\n", .{});
         print("Telegram Chat ID: {?d}\n", .{self.config.telegram_chat_id});
         print("Discord Channel ID: {s}\n", .{self.config.discord_channel_id});
-        print("Webhook Spoofing: Enabled\n", .{});
         print("File Server Port: {d}\n", .{self.config.avatar_server_port});
-        print("Files Directory: {s}\n", .{self.config.files_directory});
-        print("File Base URL: {s}\n", .{self.config.avatar_base_url});
         print("Debug mode: {}\n", .{self.config.debug_mode});
         print("Press Ctrl+C to exit\n\n", .{});
 
-        // Set up message handlers
+        // Set up handlers and connections
         self.telegram_client.setMessageHandler(self, &onTelegramMessage);
         self.discord_client.setMessageHandler(self, &onDiscordMessage);
-        
-        // Set up webhook executor in Discord client
         self.discord_client.setWebhookExecutor(self.webhook_executor);
-
-        // Set up file ID mapping for HTTP server
         self.avatar_server.setFileIdMapping(&self.telegram_client.file_id_to_path);
         
-        // Start file HTTP server in a separate thread
+        // Start services
         print("[Bridge] Starting file HTTP server...\n", .{});
         const avatar_server_thread = try std.Thread.spawn(.{}, startAvatarServer, .{&self.avatar_server});
         defer avatar_server_thread.join();
 
-        // Start Telegram client
         print("[Bridge] Starting Telegram client...\n", .{});
         try self.telegram_client.start();
 
-        // Start Discord client in a separate thread
         print("[Bridge] Starting Discord client...\n", .{});
         const discord_thread = try std.Thread.spawn(.{}, startDiscordClient, .{&self.discord_client});
         defer discord_thread.join();
 
-        // Main event loop for Telegram
-        print("[Bridge] Bridge is now running with user spoofing and avatar server!\n", .{});
+        print("[Bridge] Bridge is now running!\n", .{});
         while (true) {
             if (!try self.telegram_client.tick()) {
                 break;
             }
-            
-            // Small delay to prevent busy waiting
             std.time.sleep(10 * std.time.ns_per_ms);
         }
     }
@@ -432,115 +378,54 @@ fn parseEnvI64(allocator: Allocator, env_var: []const u8) !?i64 {
     };
 }
 
+fn getRequiredEnvVar(allocator: Allocator, env_var: []const u8, description: []const u8) ![]const u8 {
+    return std.process.getEnvVarOwned(allocator, env_var) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => {
+            print("Error: Please set {s} environment variable\n", .{env_var});
+            print("{s}\n", .{description});
+            return err;
+        },
+        else => return err,
+    };
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Get Telegram API credentials
-    const api_id_str = std.process.getEnvVarOwned(allocator, "TELEGRAM_API_ID") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            print("Error: Please set TELEGRAM_API_ID environment variable\n", .{});
-            print("Get your API credentials from https://my.telegram.org/apps\n", .{});
-            return;
-        },
-        else => return err,
-    };
+    // Get required environment variables
+    const api_id_str = try getRequiredEnvVar(allocator, "TELEGRAM_API_ID", "Get your API credentials from https://my.telegram.org/apps");
     defer allocator.free(api_id_str);
 
-    const api_hash = std.process.getEnvVarOwned(allocator, "TELEGRAM_API_HASH") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            print("Error: Please set TELEGRAM_API_HASH environment variable\n", .{});
-            print("Get your API credentials from https://my.telegram.org/apps\n", .{});
-            return;
-        },
-        else => return err,
-    };
+    const api_hash = try getRequiredEnvVar(allocator, "TELEGRAM_API_HASH", "Get your API credentials from https://my.telegram.org/apps");
     defer allocator.free(api_hash);
 
+    const discord_token = try getRequiredEnvVar(allocator, "DISCORD_TOKEN", "Get your bot token from https://discord.com/developers/applications");
+    defer allocator.free(discord_token);
+
+    const discord_channel_id = try getRequiredEnvVar(allocator, "DISCORD_CHANNEL", "This should be the Discord channel ID where messages will be bridged");
+    defer allocator.free(discord_channel_id);
+
+    const discord_server_id = try getRequiredEnvVar(allocator, "DISCORD_SERVER", "This should be the Discord server ID where messages will be bridged");
+    defer allocator.free(discord_server_id);
+
+    const discord_webhook_url = try getRequiredEnvVar(allocator, "DISCORD_WEBHOOK_URL", "Create a webhook in your Discord channel settings");
+    defer allocator.free(discord_webhook_url);
+
+    // Parse required values
     const api_id = std.fmt.parseInt(i32, api_id_str, 10) catch {
         print("Error: TELEGRAM_API_ID must be a valid integer\n", .{});
         return;
     };
 
-    // Get Discord token
-    const discord_token = std.process.getEnvVarOwned(allocator, "DISCORD_TOKEN") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            print("Error: Please set DISCORD_TOKEN environment variable\n", .{});
-            print("Get your bot token from https://discord.com/developers/applications\n", .{});
-            return;
-        },
-        else => return err,
-    };
-    defer allocator.free(discord_token);
-
-    // Get Discord channel
-    const discord_channel_id = std.process.getEnvVarOwned(allocator, "DISCORD_CHANNEL") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            print("Error: Please set DISCORD_CHANNEL environment variable\n", .{});
-            print("This should be the Discord channel ID where messages will be bridged\n", .{});
-            print("To get a channel ID:\n", .{});
-            print("  1. Enable Developer Mode in Discord settings\n", .{});
-            print("  2. Right-click on the target channel\n", .{});
-            print("  3. Select 'Copy Channel ID'\n", .{});
-            return;
-        },
-        else => return err,
-    };
-    defer allocator.free(discord_channel_id);
-
     const telegram_chat_id = parseEnvI64(allocator, "TELEGRAM_CHAT_ID") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => {
             print("Error: Please set TELEGRAM_CHAT_ID environment variable\n", .{});
-            print("This should be the Telegram chat ID where messages will be bridged\n", .{});
             return;
         },
         else => return err,
     };
-
-    const discord_server_id = std.process.getEnvVarOwned(allocator, "DISCORD_SERVER") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            print("Error: Please set DISCORD_SERVER environment variable\n", .{});
-            print("This should be the Discord server ID where messages will be bridged\n", .{});
-            return;
-        },
-        else => return err,
-    };
-    defer allocator.free(discord_server_id);
-
-    // Get required Discord webhook URL for user spoofing
-    const discord_webhook_url = std.process.getEnvVarOwned(allocator, "DISCORD_WEBHOOK_URL") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            print("Error: Please set DISCORD_WEBHOOK_URL environment variable\n", .{});
-            print("This is required for user spoofing functionality.\n", .{});
-            print("To create a webhook:\n", .{});
-            print("  1. Go to your Discord channel settings\n", .{});
-            print("  2. Navigate to 'Integrations' → 'Webhooks'\n", .{});
-            print("  3. Click 'Create Webhook'\n", .{});
-            print("  4. Copy the webhook URL\n", .{});
-            print("  5. Set DISCORD_WEBHOOK_URL environment variable\n", .{});
-            print("Example: export DISCORD_WEBHOOK_URL=\"https://discord.com/api/webhooks/ID/TOKEN\"\n", .{});
-            return;
-        },
-        else => return err,
-    };
-    defer allocator.free(discord_webhook_url);
-
-    // Get debug mode
-    var debug_mode = false;
-    if (std.process.getEnvVarOwned(allocator, "DEBUG")) |debug_str| {
-        defer allocator.free(debug_str);
-        debug_mode = std.mem.eql(u8, debug_str, "1") or std.mem.eql(u8, debug_str, "true");
-    } else |_| {
-        // Default to false
-    }
-
-    // Get avatar base URL (optional, defaults to localhost)
-    const avatar_base_url = std.process.getEnvVarOwned(allocator, "AVATAR_BASE_URL") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => try allocator.dupe(u8, "http://127.0.0.1:8080"),
-        else => return err,
-    };
-    defer allocator.free(avatar_base_url);
 
     const discord_server_id_parsed = Discord.Snowflake.fromRaw(discord_server_id) catch {
         print("Error: DISCORD_SERVER must be a valid Discord snowflake\n", .{});
@@ -551,6 +436,19 @@ pub fn main() !void {
         print("Error: DISCORD_CHANNEL must be a valid Discord snowflake\n", .{});
         return;
     };
+
+    // Get optional environment variables
+    var debug_mode = false;
+    if (std.process.getEnvVarOwned(allocator, "DEBUG")) |debug_str| {
+        defer allocator.free(debug_str);
+        debug_mode = std.mem.eql(u8, debug_str, "1") or std.mem.eql(u8, debug_str, "true");
+    } else |_| {}
+
+    const avatar_base_url = std.process.getEnvVarOwned(allocator, "AVATAR_BASE_URL") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => try allocator.dupe(u8, "http://127.0.0.1:8080"),
+        else => return err,
+    };
+    defer allocator.free(avatar_base_url);
 
     const config = BridgeConfig{
         .debug_mode = debug_mode,
@@ -571,6 +469,5 @@ pub fn main() !void {
     defer bridge.deinit();
 
     try bridge.start();
-
     print("\nBridge session completed!\n", .{});
 } 

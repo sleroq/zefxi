@@ -12,20 +12,13 @@ pub const DiscordError = error{
 
 pub const MessageHandler = *const fn (ctx: *anyopaque, channel_id: []const u8, user_id: []const u8, username: []const u8, message_text: []const u8) void;
 
-// Webhook execution payload structure
-pub const WebhookExecutePayload = struct {
+const WebhookExecutePayload = struct {
     content: ?[]const u8 = null,
     username: ?[]const u8 = null,
     avatar_url: ?[]const u8 = null,
-    tts: ?bool = null,
     embeds: ?[]Discord.Embed = null,
-    allowed_mentions: ?Discord.AllowedMentions = null,
-    components: ?[]Discord.MessageComponent = null,
-    files: ?[]Discord.FileData = null,
-    thread_id: ?Discord.Snowflake = null,
 };
 
-// WebhookExecutor for sending messages with custom username and avatar
 pub const WebhookExecutor = struct {
     allocator: Allocator,
     webhook_url: []const u8,
@@ -41,11 +34,10 @@ pub const WebhookExecutor = struct {
         };
     }
     
-    pub fn executeWebhook(self: *Self, payload: WebhookExecutePayload) !void {
+    fn executeWebhook(self: *Self, payload: WebhookExecutePayload) !void {
         var client = std.http.Client{ .allocator = self.allocator };
         defer client.deinit();
         
-        // Serialize the payload to JSON
         var json_payload = std.ArrayList(u8).init(self.allocator);
         defer json_payload.deinit();
         
@@ -57,28 +49,20 @@ pub const WebhookExecutor = struct {
             print("[Webhook] Sending payload: {s}\n", .{json_payload.items});
         }
         
-        // Create the request
         var headers = std.ArrayList(std.http.Header).init(self.allocator);
         defer headers.deinit();
         
         try headers.append(.{ .name = "Content-Type", .value = "application/json" });
         try headers.append(.{ .name = "User-Agent", .value = "DiscordBot (zefxi, 1.0)" });
         
-        const fetch_options = std.http.Client.FetchOptions{
-            .location = .{ .url = self.webhook_url },
-            .method = .POST,
-            .payload = json_payload.items,
-            .extra_headers = try headers.toOwnedSlice(),
-        };
-        
         var response_body = std.ArrayList(u8).init(self.allocator);
         defer response_body.deinit();
         
         const fetch_result = client.fetch(.{
-            .location = fetch_options.location,
-            .method = fetch_options.method,
-            .payload = fetch_options.payload,
-            .extra_headers = fetch_options.extra_headers,
+            .location = .{ .url = self.webhook_url },
+            .method = .POST,
+            .payload = json_payload.items,
+            .extra_headers = try headers.toOwnedSlice(),
             .response_storage = .{ .dynamic = &response_body },
         }) catch |err| {
             print("[Webhook] Request failed: {}\n", .{err});
@@ -87,7 +71,9 @@ pub const WebhookExecutor = struct {
         
         if (self.debug_mode) {
             print("[Webhook] Response status: {}\n", .{fetch_result.status});
-            print("[Webhook] Response body: {s}\n", .{response_body.items});
+            if (response_body.items.len > 0) {
+                print("[Webhook] Response body: {s}\n", .{response_body.items});
+            }
         }
         
         switch (fetch_result.status.class()) {
@@ -117,14 +103,13 @@ pub const WebhookExecutor = struct {
     }
     
     pub fn sendSpoofedMessageWithImage(self: *Self, content: ?[]const u8, username: ?[]const u8, avatar_url: ?[]const u8, image_url: []const u8) !void {
-        // Create an embed with the image
         const embed = Discord.Embed{
             .image = .{ .url = image_url },
             .description = content,
         };
         
         const payload = WebhookExecutePayload{
-            .content = null, // Content goes in embed description
+            .content = null,
             .username = username,
             .avatar_url = avatar_url,
             .embeds = @constCast(&[_]Discord.Embed{embed}),
@@ -134,8 +119,6 @@ pub const WebhookExecutor = struct {
     }
     
     pub fn sendSpoofedMessageWithAnimation(self: *Self, content: ?[]const u8, username: ?[]const u8, avatar_url: ?[]const u8, animation_url: []const u8) !void {
-        // For animations/GIFs, Discord needs the URL in the message content for auto-embedding
-        // Don't use embed.image as it doesn't work properly for animated content
         const message_content = if (content) |caption|
             try std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ caption, animation_url })
         else
@@ -152,7 +135,6 @@ pub const WebhookExecutor = struct {
     }
 };
 
-// Global state for the Discord client (needed for callbacks)
 var global_client: ?*DiscordClient = null;
 
 pub const DiscordClient = struct {
@@ -202,15 +184,6 @@ pub const DiscordClient = struct {
         self.webhook_executor = webhook_executor;
     }
 
-    pub fn sendWebhookMessage(self: *Self, content: []const u8, username: ?[]const u8, avatar_url: ?[]const u8) !void {
-        if (self.webhook_executor) |*executor| {
-            try executor.sendSpoofedMessage(content, username, avatar_url);
-        } else {
-            print("[Discord] No webhook executor configured\n", .{});
-            return DiscordError.WebhookExecutionFailed;
-        }
-    }
-
     fn ready(_: *Discord.Shard, payload: Discord.Ready) !void {
         print("[Discord] Logged in as {s}\n", .{payload.user.username});
     }
@@ -218,28 +191,23 @@ pub const DiscordClient = struct {
     fn messageCreate(_: *Discord.Shard, message: Discord.Message) !void {
         const client = global_client orelse return;
         
-        // Skip messages from bots
-        // TODO: Skip messages only from the bot itself
         if (message.author.bot orelse false) return;
         
         if (message.channel_id != client.target_channel_id) return;
         
         const content = message.content orelse "";
         
-        // Prioritize display name (global_name) over username for more natural names
         const display_name = if (message.author.global_name) |global_name|
             global_name
         else
             message.author.username;
         
-        print("[Discord] NEW MESSAGE: Channel {}, User {s} ({}): {s}\n", .{ 
-            message.channel_id, display_name, message.author.id, content 
+        print("[Discord] NEW MESSAGE: Channel {}, User {s}: {s}\n", .{ 
+            message.channel_id, display_name, content 
         });
         
-        // Call the message handler if set
         if (client.message_handler) |handler| {
             if (client.message_handler_ctx) |ctx| {
-                // Convert Snowflakes to strings
                 const channel_id_str = std.fmt.allocPrint(client.allocator, "{}", .{message.channel_id}) catch return;
                 defer client.allocator.free(channel_id_str);
                 
@@ -263,7 +231,6 @@ pub const DiscordClient = struct {
 
         print("[Discord] Starting Discord client...\n", .{});
         
-        // Set the global client reference for the callback
         global_client = self;
         
         try self.session.start(.{
