@@ -4,9 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    zig.url = "github:mitchellh/zig-overlay";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, zig }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -14,41 +15,28 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            # Zig compiler
-            zig
-
-            # TDLib - Telegram Database Library
+            zig.packages.${system}.master
             tdlib
-
-            # Development tools
-            gdb
-            valgrind
-            
-            # Network debugging tools (optional)
-            wireshark
-            tcpdump
-            netcat
           ];
 
           shellHook = ''
-            echo "🚀 Zefxi Development Environment"
+            source .env
+
+            echo "Zefxi Development Environment"
             echo "================================"
             echo "Zig version: $(zig version)"
             echo "TDLib version: $(pkg-config --modversion tdjson 2>/dev/null || echo 'installed')"
             echo ""
             echo "Available commands:"
-            echo "  zig build run         - Run the TDLib client"
+            echo "  zig build run         - Run the bridge"
             echo "  zig build             - Build the project"
-            echo "  zig build test        - Run tests"
             echo ""
             echo "Environment variables needed:"
             echo "  TELEGRAM_API_ID       - Your Telegram API ID"
             echo "  TELEGRAM_API_HASH     - Your Telegram API Hash"
-            echo ""
-            echo "Get API credentials from: https://my.telegram.org/apps"
-            echo ""
-            echo "This implementation uses TDLib JSON interface"
-            echo "High-level, reliable Telegram client library!"
+            echo "  DISCORD_TOKEN         - Your Discord bot token"
+            echo "  DISCORD_SERVER        - Your Discord server ID"
+            echo "  DISCORD_CHANNEL       - Your Discord channel ID"
             echo ""
           '';
         };
@@ -61,7 +49,7 @@
           src = ./.;
           
           nativeBuildInputs = with pkgs; [
-            zig
+            zig.packages.${system}.master
             pkg-config
           ];
 
