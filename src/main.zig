@@ -142,6 +142,32 @@ const TelegramClient = struct {
         self.send(buffer.items);
     }
 
+    pub fn checkAuthenticationPassword(self: *Self, password: []const u8) void {
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        
+        const writer = buffer.writer();
+        writer.print(
+            "{{\"@type\":\"checkAuthenticationPassword\",\"password\":\"{s}\"}}", 
+            .{password}
+        ) catch return;
+        
+        self.send(buffer.items);
+    }
+
+    pub fn registerUser(self: *Self, first_name: []const u8, last_name: []const u8) void {
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        
+        const writer = buffer.writer();
+        writer.print(
+            "{{\"@type\":\"registerUser\",\"first_name\":\"{s}\",\"last_name\":\"{s}\"}}", 
+            .{ first_name, last_name }
+        ) catch return;
+        
+        self.send(buffer.items);
+    }
+
     pub fn processUpdate(self: *Self, update_json: []const u8) !void {
         print("Received update: {s}\n", .{update_json});
         
@@ -156,7 +182,17 @@ const TelegramClient = struct {
         
         if (root.get("@type")) |type_value| {
             const update_type = type_value.string;
-            print("Update type: {s}\n", .{update_type});
+            
+            // Only show important updates to reduce noise
+            if (std.mem.eql(u8, update_type, "updateAuthorizationState") or
+                std.mem.eql(u8, update_type, "updateNewMessage") or
+                std.mem.eql(u8, update_type, "updateConnectionState") or
+                std.mem.eql(u8, update_type, "chats") or
+                std.mem.eql(u8, update_type, "user") or
+                std.mem.eql(u8, update_type, "ok") or
+                std.mem.eql(u8, update_type, "error")) {
+                print("Update type: {s}\n", .{update_type});
+            }
             
             if (std.mem.eql(u8, update_type, "updateAuthorizationState")) {
                 try self.handleAuthorizationState(root);
@@ -170,6 +206,10 @@ const TelegramClient = struct {
                 try self.handleChats(root);
             } else if (std.mem.eql(u8, update_type, "user")) {
                 try self.handleUser(root);
+            } else if (std.mem.eql(u8, update_type, "ok")) {
+                print("✅ Request completed successfully\n", .{});
+            } else if (std.mem.eql(u8, update_type, "error")) {
+                try self.handleError(root);
             }
         }
     }
@@ -194,6 +234,19 @@ const TelegramClient = struct {
                     const code = try self.readInput();
                     defer self.allocator.free(code);
                     self.checkAuthenticationCode(code);
+                } else if (std.mem.eql(u8, state_name, "authorizationStateWaitPassword")) {
+                    print("Please enter your 2FA password: ", .{});
+                    const password = try self.readInput();
+                    defer self.allocator.free(password);
+                    self.checkAuthenticationPassword(password);
+                } else if (std.mem.eql(u8, state_name, "authorizationStateWaitRegistration")) {
+                    print("Please enter your first name: ", .{});
+                    const first_name = try self.readInput();
+                    defer self.allocator.free(first_name);
+                    print("Please enter your last name: ", .{});
+                    const last_name = try self.readInput();
+                    defer self.allocator.free(last_name);
+                    self.registerUser(first_name, last_name);
                 } else if (std.mem.eql(u8, state_name, "authorizationStateReady")) {
                     print("✅ Authorization successful!\n", .{});
                     self.is_authorized = true;
@@ -290,7 +343,14 @@ const TelegramClient = struct {
                 
                 self.send(buffer.items);
                 print("📂 Opened chat {d}\n", .{chat_id});
+                
+                // Small delay between opening chats
+                std.time.sleep(100 * std.time.ns_per_ms);
             }
+            
+            print("✅ All chats opened! You should now receive messages in real-time.\n", .{});
+        } else {
+            print("❌ No chat_ids found in response\n", .{});
         }
     }
 
@@ -302,6 +362,19 @@ const TelegramClient = struct {
             } else {
                 print("👤 Logged in as: {s}\n", .{first_name.string});
             }
+        }
+    }
+
+    fn handleError(self: *Self, root: std.json.ObjectMap) !void {
+        _ = self;
+        if (root.get("message")) |message| {
+            if (root.get("code")) |code| {
+                print("❌ Error {d}: {s}\n", .{ code.integer, message.string });
+            } else {
+                print("❌ Error: {s}\n", .{message.string});
+            }
+        } else {
+            print("❌ Unknown error occurred\n", .{});
         }
     }
 
