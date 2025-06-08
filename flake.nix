@@ -18,29 +18,41 @@
         env = zig2nix.outputs.zig-env.${pkgs.system} {
           zig = zig2nix.outputs.packages.${pkgs.system}.zig-master;
         };
-        # Build zefxi using zig2nix
-        zefxiPackage = env.package {
-          src = lib.cleanSource ./.;
-          
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-          ];
+        # Build zefxi using zig2nix - use the same configuration as packages.default
+        zefxiPackage = 
+          let
+            foreignPkg = env.package {
+              src = lib.cleanSource ./.;
+              
+              nativeBuildInputs = with pkgs; [
+                pkg-config
+              ];
 
-          buildInputs = with pkgs; [
-            tdlib
-          ];
+              buildInputs = with pkgs; [
+                tdlib
+              ];
 
-          # Prefer nix friendly settings for NixOS module
-          zigPreferMusl = false;
-          
-          # Libraries required for runtime
-          zigWrapperLibs = with pkgs; [ tdlib glibc ];
-          
-          # Ensure proper dynamic linking on NixOS
-          zigWrapperArgs = [
-            "--set LD_LIBRARY_PATH ${pkgs.lib.makeLibraryPath [ pkgs.tdlib pkgs.glibc ]}"
-          ];
-        };
+              # Smaller binaries and avoids shipping glibc.
+              zigPreferMusl = true;
+            };
+          in
+          foreignPkg.override (attrs: {
+            # Prefer nix friendly settings.
+            zigPreferMusl = false;
+
+            # Executables required for runtime
+            # These packages will be added to the PATH
+            zigWrapperBins = with pkgs; [];
+
+            # Libraries required for runtime
+            # These packages will be added to the LD_LIBRARY_PATH
+            zigWrapperLibs = (attrs.buildInputs or []) ++ (with pkgs; [ glibc ]);
+            
+            # Ensure proper dynamic linking on NixOS
+            zigWrapperArgs = [
+              "--set LD_LIBRARY_PATH ${pkgs.lib.makeLibraryPath ([ pkgs.tdlib pkgs.glibc ] ++ (attrs.buildInputs or []))}"
+            ];
+          });
       in {
         options.services.zefxi = {
           enable = mkEnableOption "Zefxi Telegram-Discord Bridge";
