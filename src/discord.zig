@@ -10,7 +10,7 @@ pub const DiscordError = error{
     WebhookExecutionFailed,
 };
 
-pub const MessageHandler = *const fn (ctx: *anyopaque, channel_id: []const u8, user_id: []const u8, username: []const u8, message_text: []const u8) void;
+pub const MessageHandler = *const fn (ctx: *anyopaque, channel_id: []const u8, user_id: []const u8, username: []const u8, message_text: []const u8, attachments: ?[]const Discord.Attachment) void;
 
 const WebhookExecutePayload = struct {
     content: ?[]const u8 = null,
@@ -93,6 +93,12 @@ pub const WebhookExecutor = struct {
     }
     
     pub fn sendSpoofedMessage(self: *Self, content: []const u8, username: ?[]const u8, avatar_url: ?[]const u8) !void {
+        // Debug: Log what we're trying to send
+        print("[Webhook] Sending spoofed message:\n", .{});
+        print("[Webhook]   Content: {s}\n", .{content});
+        print("[Webhook]   Username: {?s}\n", .{username});
+        print("[Webhook]   Avatar URL: {?s}\n", .{avatar_url});
+        
         const payload = WebhookExecutePayload{
             .content = content,
             .username = username,
@@ -202,9 +208,18 @@ pub const DiscordClient = struct {
         else
             message.author.username;
         
-        print("[Discord] NEW MESSAGE: Channel {}, User {s}: {s}\n", .{ 
-            message.channel_id, display_name, content 
-        });
+        // Check for attachments
+        const has_attachments = message.attachments.len > 0;
+        
+        if (has_attachments) {
+            print("[Discord] NEW MESSAGE: Channel {}, User {s}: {s} [with {} attachment(s)]\n", .{ 
+                message.channel_id, display_name, content, message.attachments.len 
+            });
+        } else {
+            print("[Discord] NEW MESSAGE: Channel {}, User {s}: {s}\n", .{ 
+                message.channel_id, display_name, content 
+            });
+        }
         
         if (client.message_handler) |handler| {
             if (client.message_handler_ctx) |ctx| {
@@ -214,7 +229,7 @@ pub const DiscordClient = struct {
                 const user_id_str = std.fmt.allocPrint(client.allocator, "{}", .{message.author.id}) catch return;
                 defer client.allocator.free(user_id_str);
                 
-                handler(ctx, channel_id_str, user_id_str, display_name, content);
+                handler(ctx, channel_id_str, user_id_str, display_name, content, if (has_attachments) message.attachments else null);
             }
         }
     }

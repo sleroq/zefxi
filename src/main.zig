@@ -101,11 +101,20 @@ const Bridge = struct {
     fn onTelegramMessage(ctx: *anyopaque, chat_id: i64, user_info: telegram.UserInfo, content: telegram.MessageContent) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         
-        const display_name = user_info.getDisplayName(self.allocator) catch {
-            print("[Bridge] Failed to get display name for user {d}\n", .{user_info.user_id});
+        // Debug user info before getting display name
+        print("[Bridge] Processing message from user {d}\n", .{user_info.user_id});
+        print("[Bridge] User first_name: '{s}'\n", .{user_info.first_name});
+        if (user_info.last_name) |lname| {
+            print("[Bridge] User last_name: '{s}'\n", .{lname});
+        }
+        
+        const display_name = user_info.getDisplayName(self.allocator) catch |err| {
+            print("[Bridge] Failed to get display name for user {d}: {}\n", .{ user_info.user_id, err });
             return;
         };
         defer self.allocator.free(display_name);
+        
+        print("[Bridge] Generated display_name: '{s}'\n", .{display_name});
         
         if (self.config.debug_mode) {
             print("[Bridge] Processing message from user {s} ({d})\n", .{ display_name, user_info.user_id });
@@ -125,7 +134,12 @@ const Bridge = struct {
     }
 
     fn handleTextMessage(self: *Self, chat_id: i64, display_name: []const u8, user_info: telegram.UserInfo, message_text: []const u8) void {
-        print("[Bridge] Telegram -> Discord: Chat {d}, User {s}: {s}\n", .{ chat_id, display_name, message_text });
+        // Validate strings before printing to avoid crashes
+        const safe_display_name = if (std.unicode.utf8ValidateSlice(display_name)) display_name else "<invalid_utf8_name>";
+        const safe_message_text = if (std.unicode.utf8ValidateSlice(message_text)) message_text else "<invalid_utf8_message>";
+        
+        print("[Bridge] Telegram -> Discord: Chat {d}, User {s}: {s}\n", .{ chat_id, safe_display_name, safe_message_text });
+        print("[Bridge] User avatar_url: {?s}\n", .{user_info.avatar_url});
         
         if (message_text.len == 0) return;
         
@@ -284,11 +298,8 @@ const Bridge = struct {
         }
     }
 
-    fn onDiscordMessage(ctx: *anyopaque, channel_id: []const u8, _: []const u8, username: []const u8, message_text: []const u8) void {
+    fn onDiscordMessage(ctx: *anyopaque, channel_id: []const u8, _: []const u8, username: []const u8, message_text: []const u8, attachments: ?[]const Discord.Attachment) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        print("[Bridge] Discord -> Telegram: Channel {s}, User {s}: {s}\n", .{ channel_id, username, message_text });
-        
-        if (message_text.len == 0) return;
         
         // Skip messages that appear to be from bridge fallback
         if (std.mem.startsWith(u8, message_text, "**")) {
@@ -298,20 +309,107 @@ const Bridge = struct {
             return;
         }
         
+        const has_text = message_text.len > 0;
+        const has_attachments = attachments != null and attachments.?.len > 0;
+        
+        if (has_attachments) {
+            print("[Bridge] Discord -> Telegram: Channel {s}, User {s}: {s} [with {} attachment(s)]\n", .{ 
+                channel_id, username, message_text, attachments.?.len 
+            });
+        } else {
+            print("[Bridge] Discord -> Telegram: Channel {s}, User {s}: {s}\n", .{ 
+                channel_id, username, message_text 
+            });
+        }
+        
+        if (!has_text and !has_attachments) {
+            if (self.config.debug_mode) {
+                print("[Bridge] Skipping empty message\n", .{});
+            }
+            return;
+        }
+        
         if (self.config.telegram_chat_id) |chat_id| {
-            const formatted_message = std.fmt.allocPrint(
-                self.allocator, 
-                "{s}: {s}", 
-                .{ username, message_text }
-            ) catch {
-                print("[Bridge] Failed to format message for Telegram\n", .{});
-                return;
-            };
-            defer self.allocator.free(formatted_message);
-            
-            self.telegram_client.sendMessage(chat_id, formatted_message) catch |err| {
-                print("[Bridge] Failed to send message to Telegram: {}\n", .{err});
-            };
+            if (has_text and has_attachments) {
+                // Message with both text and attachments - send as one combined message
+                var message_parts = std.ArrayList([]const u8).init(self.allocator);
+                defer message_parts.deinit();
+                
+                // Add the text content
+                const text_part = std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}: {s}",
+                    .{ username, message_text }
+                ) catch {
+                    print("[Bridge] Failed to format text part for Telegram\n", .{});
+                    return;
+                };
+                defer self.allocator.free(text_part);
+                message_parts.append(text_part) catch return;
+                
+                // Add attachment info
+                for (attachments.?) |attachment| {
+                    const attachment_part = std.fmt.allocPrint(
+                        self.allocator,
+                        "[Attachment: {s}] {s}",
+                        .{ attachment.filename, attachment.url }
+                    ) catch {
+                        print("[Bridge] Failed to format attachment part for Telegram\n", .{});
+                        continue;
+                    };
+                    defer self.allocator.free(attachment_part);
+                    message_parts.append(attachment_part) catch continue;
+                }
+                
+                // Combine all parts
+                const combined_message = std.mem.join(self.allocator, "\n", message_parts.items) catch {
+                    print("[Bridge] Failed to join message parts for Telegram\n", .{});
+                    return;
+                };
+                defer self.allocator.free(combined_message);
+                
+                self.telegram_client.sendMessage(chat_id, combined_message) catch |err| {
+                    print("[Bridge] Failed to send combined message to Telegram: {}\n", .{err});
+                };
+                
+            } else if (has_text) {
+                // Text-only message
+                const formatted_message = std.fmt.allocPrint(
+                    self.allocator, 
+                    "{s}: {s}", 
+                    .{ username, message_text }
+                ) catch {
+                    print("[Bridge] Failed to format message for Telegram\n", .{});
+                    return;
+                };
+                defer self.allocator.free(formatted_message);
+                
+                self.telegram_client.sendMessage(chat_id, formatted_message) catch |err| {
+                    print("[Bridge] Failed to send message to Telegram: {}\n", .{err});
+                };
+                
+            } else if (has_attachments) {
+                // Attachment-only message
+                for (attachments.?) |attachment| {
+                    if (self.config.debug_mode) {
+                        print("[Bridge] Processing Discord attachment: {s} ({})\n", .{ attachment.filename, attachment.size });
+                    }
+                    
+                    const attachment_message = std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}: [Attachment: {s}]\n{s}",
+                        .{ username, attachment.filename, attachment.url }
+                    ) catch {
+                        print("[Bridge] Failed to format attachment message for Telegram\n", .{});
+                        continue;
+                    };
+                    defer self.allocator.free(attachment_message);
+                    
+                    self.telegram_client.sendMessage(chat_id, attachment_message) catch |err| {
+                        print("[Bridge] Failed to send attachment message to Telegram: {}\n", .{err});
+                    };
+                }
+            }
         } else {
             print("[Bridge] No Telegram chat configured, message not forwarded\n", .{});
         }

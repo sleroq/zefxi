@@ -160,6 +160,7 @@ pub const TelegramClient = struct {
     pending_images: std.HashMap(i32, PendingAttachmentMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
     pending_user_messages: std.ArrayList(PendingUserMessage),
     file_id_to_path: std.HashMap(i32, []const u8, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
+    profile_photo_requests: std.HashMap(i64, i64, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage), // user_id -> timestamp
     
     const Self = @This();
 
@@ -182,6 +183,7 @@ pub const TelegramClient = struct {
             .pending_images = std.HashMap(i32, PendingAttachmentMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
             .pending_user_messages = std.ArrayList(PendingUserMessage).init(allocator),
             .file_id_to_path = std.HashMap(i32, []const u8, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
+            .profile_photo_requests = std.HashMap(i64, i64, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage).init(allocator),
         };
     }
 
@@ -229,6 +231,9 @@ pub const TelegramClient = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.file_id_to_path.deinit();
+        
+        // Clean up profile photo requests
+        self.profile_photo_requests.deinit();
     }
 
     pub fn setMessageHandler(self: *Self, ctx: *anyopaque, handler: MessageHandler) void {
@@ -495,6 +500,9 @@ pub const TelegramClient = struct {
         } else if (std.mem.eql(u8, update_type, "userProfilePhotos")) {
             print("[Telegram] 📸 Received userProfilePhotos update\n", .{});
             try self.handleUserProfilePhotos(root);
+        } else if (std.mem.eql(u8, update_type, "chatPhotos")) {
+            print("[Telegram] 📸 Received chatPhotos update (treating as userProfilePhotos)\n", .{});
+            try self.handleUserProfilePhotos(root);
 
         } else if (std.mem.eql(u8, update_type, "file")) {
             print("[Telegram] 📁 Received file update\n", .{});
@@ -502,9 +510,8 @@ pub const TelegramClient = struct {
         } else if (std.mem.eql(u8, update_type, "error")) {
             try self.handleError(root);
         } else {
-            if (self.config.debug_mode) {
-                print("[Telegram] 🔍 Unknown update type: {s}\n", .{update_type});
-            }
+            // Always log unknown update types to help debug profile photos issue
+            print("[Telegram] 🔍 Unknown update type: {s}\n", .{update_type});
         }
     }
 
@@ -694,6 +701,10 @@ pub const TelegramClient = struct {
                 try self.requestUserInfo(user_id);
                 try self.requestUserProfilePhotos(user_id);
                 
+                // Track when we requested profile photos for timeout handling
+                const timestamp = std.time.milliTimestamp();
+                try self.profile_photo_requests.put(user_id, timestamp);
+                
                 const pending_user_msg = PendingUserMessage{
                     .chat_id = message_chat_id,
                     .user_id = user_id,
@@ -805,18 +816,19 @@ pub const TelegramClient = struct {
             try self.user_cache.put(user_id, user_info);
             
             if (self.config.debug_mode) {
-                print("[Telegram] Cached user info for {d}: {s}\n", .{ user_id, first_name });
+                print("[Telegram] Cached user info for {d}: first_name='{s}', last_name='{?s}', username='{?s}'\n", .{ user_id, user_info.first_name, user_info.last_name, user_info.username });
             }
             
             if (user_id == self.my_user_id) {
-                if (username) |uname| {
-                    print("[Telegram] Logged in as: {s} (@{s})\n", .{ first_name, uname });
+                if (user_info.username) |uname| {
+                    print("[Telegram] Logged in as: {s} (@{s})\n", .{ user_info.first_name, uname });
                 } else {
-                    print("[Telegram] Logged in as: {s}\n", .{first_name});
+                    print("[Telegram] Logged in as: {s}\n", .{user_info.first_name});
                 }
             }
             
-            try self.processPendingUserMessages(user_id);
+            // Don't process pending messages immediately - wait for avatar download or timeout
+            // Avatar will be downloaded or confirmed as unavailable, then messages will be processed
         }
     }
 
@@ -832,12 +844,37 @@ pub const TelegramClient = struct {
             return;
         };
         
+        // For first messages from a user, wait for avatar to be downloaded or confirmed as unavailable
+        // avatar_url will be either a valid URL or an empty string (indicating no avatar available)
         const should_wait_for_avatar = user_info.avatar_url == null;
         if (should_wait_for_avatar) {
-            if (self.config.debug_mode) {
-                print("[Telegram] ⏳ Waiting for avatar download for user {d} before processing messages\n", .{user_id});
+            // Check if we've been waiting too long (5 seconds timeout)
+            if (self.profile_photo_requests.get(user_id)) |request_time| {
+                const current_time = std.time.milliTimestamp();
+                const elapsed = current_time - request_time;
+                
+                if (elapsed > 5000) { // 5 second timeout
+                    print("[Telegram] ⏰ Avatar download timeout for user {d}, processing messages without avatar\n", .{user_id});
+                    
+                    // Set empty avatar URL to indicate no avatar available
+                    if (self.user_cache.getPtr(user_id)) |user_info_ptr| {
+                        user_info_ptr.avatar_url = try self.allocator.dupe(u8, "");
+                    }
+                    
+                    // Remove from timeout tracking
+                    _ = self.profile_photo_requests.remove(user_id);
+                } else {
+                    if (self.config.debug_mode) {
+                        print("[Telegram] ⏳ Waiting for avatar download for user {d} ({d}ms elapsed)\n", .{ user_id, elapsed });
+                    }
+                    return;
+                }
+            } else {
+                if (self.config.debug_mode) {
+                    print("[Telegram] ⏳ Waiting for avatar download for user {d} (no timeout tracking)\n", .{user_id});
+                }
+                return;
             }
-            return;
         }
         
         var i: usize = 0;
@@ -845,17 +882,39 @@ pub const TelegramClient = struct {
             const pending_msg = &self.pending_user_messages.items[i];
             
             if (pending_msg.user_id == user_id) {
-                if (self.config.debug_mode) {
-                    print("[Telegram] ✅ Processing queued message from user {d} (with avatar)\n", .{user_id});
-                }
-                
                 const should_wait_for_attachment = switch (pending_msg.content) {
                     .attachment => |attachment| attachment.url == null,
                     .text_with_attachment => |text_attachment| text_attachment.attachment.url == null,
                     .text => false,
                 };
                 
-                if (should_wait_for_attachment) {
+                // For text-only messages, process immediately regardless of avatar status
+                // For attachment messages, wait for attachment download but use current avatar status
+                const can_process_now = switch (pending_msg.content) {
+                    .text => true, // Always process text messages immediately
+                    .attachment, .text_with_attachment => !should_wait_for_attachment, // Process attachment messages only when attachment is ready
+                };
+                
+                if (can_process_now) {
+                    if (self.config.debug_mode) {
+                        const avatar_status = if (user_info.avatar_url) |_| "with avatar" else "without avatar";
+                        print("[Telegram] ✅ Processing queued message from user {d} ({s})\n", .{ user_id, avatar_status });
+                    }
+                    
+                    if (self.message_handler) |handler| {
+                        if (self.message_handler_ctx) |ctx| {
+                            handler(ctx, pending_msg.chat_id, user_info, pending_msg.content);
+                        }
+                    }
+                    
+                    var removed_msg = self.pending_user_messages.swapRemove(i);
+                    removed_msg.deinit(self.allocator);
+                    
+                    if (self.config.debug_mode) {
+                        print("[Telegram] ✅ Sent queued message to Discord\n", .{});
+                    }
+                } else if (should_wait_for_attachment) {
+                    // Move attachment messages to pending attachments queue
                     const file_id = switch (pending_msg.content) {
                         .attachment => |attachment| attachment.file_id,
                         .text_with_attachment => |text_attachment| text_attachment.attachment.file_id,
@@ -878,24 +937,14 @@ pub const TelegramClient = struct {
                     
                     try self.pending_images.put(file_id, pending_attachment_msg);
                     
+                    _ = self.pending_user_messages.swapRemove(i);
+                    // Don't call deinit here since we moved the content to pending_images
+                    
                     if (self.config.debug_mode) {
                         print("[Telegram] Moved message to pending attachments queue for file_id {d}\n", .{file_id});
                     }
                 } else {
-                    if (self.message_handler) |handler| {
-                        if (self.message_handler_ctx) |ctx| {
-                            handler(ctx, pending_msg.chat_id, user_info, pending_msg.content);
-                        }
-                    }
-                    
-                    if (self.config.debug_mode) {
-                        print("[Telegram] ✅ Sent queued message to Discord\n", .{});
-                    }
-                }
-                
-                var removed_msg = self.pending_user_messages.swapRemove(i);
-                if (!should_wait_for_attachment) {
-                    removed_msg.deinit(self.allocator);
+                    i += 1;
                 }
             } else {
                 i += 1;
@@ -908,8 +957,16 @@ pub const TelegramClient = struct {
     }
 
     fn handleUserProfilePhotos(self: *Self, root: std.json.ObjectMap) !void {
+        print("[Telegram] handleUserProfilePhotos called\n", .{});
+        
+        // Debug: print all keys in the response
         if (self.config.debug_mode) {
-            print("[Telegram] handleUserProfilePhotos called\n", .{});
+            print("[Telegram] Profile photos response keys: ", .{});
+            var iterator = root.iterator();
+            while (iterator.next()) |entry| {
+                print("{s}, ", .{entry.key_ptr.*});
+            }
+            print("\n", .{});
         }
         
         if (root.get("@extra")) |extra| {
@@ -1008,6 +1065,9 @@ pub const TelegramClient = struct {
                             // Set empty string to indicate we checked for avatar but none exists
                             user_info.avatar_url = try self.allocator.dupe(u8, "");
                             
+                            // Remove from timeout tracking
+                            _ = self.profile_photo_requests.remove(user_id);
+                            
                             // Process pending messages now that we know there's no avatar
                             try self.processPendingUserMessages(user_id);
                         }
@@ -1088,6 +1148,9 @@ pub const TelegramClient = struct {
                                                 print("[Telegram] Avatar URL set for user {d}: {s}\n", .{ user_id, avatar_url });
                                                 print("[Telegram] Local file path: {s}\n", .{file_path});
                                             }
+                                            
+                                            // Remove from timeout tracking
+                                            _ = self.profile_photo_requests.remove(user_id);
                                             
                                             try self.processPendingUserMessages(user_id);
                                         } else {
@@ -1261,7 +1324,44 @@ pub const TelegramClient = struct {
             try self.processUpdate(result);
         }
         
+        // Check for avatar download timeouts
+        try self.checkAvatarTimeouts();
+        
         return true;
+    }
+    
+    fn checkAvatarTimeouts(self: *Self) !void {
+        const current_time = std.time.milliTimestamp();
+        var timeouts = std.ArrayList(i64).init(self.allocator);
+        defer timeouts.deinit();
+        
+        // Find users with timed out avatar requests
+        var iterator = self.profile_photo_requests.iterator();
+        while (iterator.next()) |entry| {
+            const user_id = entry.key_ptr.*;
+            const request_time = entry.value_ptr.*;
+            const elapsed = current_time - request_time;
+            
+            if (elapsed > 5000) { // 5 second timeout
+                try timeouts.append(user_id);
+            }
+        }
+        
+        // Process timeouts
+        for (timeouts.items) |user_id| {
+            print("[Telegram] ⏰ Avatar download timeout for user {d}, processing messages without avatar\n", .{user_id});
+            
+            // Set empty avatar URL to indicate no avatar available
+            if (self.user_cache.getPtr(user_id)) |user_info_ptr| {
+                user_info_ptr.avatar_url = try self.allocator.dupe(u8, "");
+            }
+            
+            // Remove from timeout tracking
+            _ = self.profile_photo_requests.remove(user_id);
+            
+            // Process pending messages
+            try self.processPendingUserMessages(user_id);
+        }
     }
 
     fn getFileEndpoint(self: *Self, file_path: []const u8) []const u8 {
