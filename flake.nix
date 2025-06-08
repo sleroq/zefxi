@@ -7,52 +7,31 @@
 
   outputs = { self, zig2nix, ... }: let
     flake-utils = zig2nix.inputs.flake-utils;
-    nixpkgs = zig2nix.inputs.nixpkgs;
   in {
     # NixOS module for zefxi
     nixosModules.zefxi = { config, lib, pkgs, ... }:
       with lib;
       let
         cfg = config.services.zefxi;
-        # Get zig2nix environment for this system - using master version for better compatibility
-        env = zig2nix.outputs.zig-env.${pkgs.system} {
-          zig = zig2nix.outputs.packages.${pkgs.system}.zig-master;
+        # Get zig2nix environment for this system
+        env = zig2nix.outputs.zig-env.${pkgs.system} { 
+          zig = zig2nix.outputs.packages.${pkgs.system}.zig-master; 
         };
-        # Build zefxi using zig2nix - use the same configuration as packages.default
-        zefxiPackage = 
-          let
-            foreignPkg = env.package {
-              src = lib.cleanSource ./.;
-              
-              nativeBuildInputs = with pkgs; [
-                pkg-config
-              ];
+        # Build zefxi using zig2nix
+        zefxiPackage = env.package {
+          src = lib.cleanSource ./.;
+          
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+          ];
 
-              buildInputs = with pkgs; [
-                tdlib
-              ];
+          buildInputs = with pkgs; [
+            tdlib
+          ];
 
-              # Smaller binaries and avoids shipping glibc.
-              zigPreferMusl = true;
-            };
-          in
-          foreignPkg.override (attrs: {
-            # Prefer nix friendly settings.
-            zigPreferMusl = false;
-
-            # Executables required for runtime
-            # These packages will be added to the PATH
-            zigWrapperBins = with pkgs; [];
-
-            # Libraries required for runtime
-            # These packages will be added to the LD_LIBRARY_PATH
-            zigWrapperLibs = (attrs.buildInputs or []) ++ (with pkgs; [ glibc ]);
-            
-            # Ensure proper dynamic linking on NixOS
-            zigWrapperArgs = [
-              "--set LD_LIBRARY_PATH ${pkgs.lib.makeLibraryPath ([ pkgs.tdlib pkgs.glibc ] ++ (attrs.buildInputs or []))}"
-            ];
-          });
+          zigWrapperLibs = with pkgs; [ tdlib ];
+          zigBuildZonLock = ./build.zig.zon2json-lock;
+        };
       in {
         options.services.zefxi = {
           enable = mkEnableOption "Zefxi Telegram-Discord Bridge";
@@ -196,51 +175,46 @@
 
     nixosModules.default = self.nixosModules.zefxi;
   } // (flake-utils.lib.eachDefaultSystem (system: let
-    # Zig flake helper - using master version for better compatibility
-    env = zig2nix.outputs.zig-env.${system} {
-      zig = zig2nix.outputs.packages.${system}.zig-master;
+    # Zig flake helper
+    env = zig2nix.outputs.zig-env.${system} { 
+      zig = zig2nix.outputs.packages.${system}.zig-master; 
     };
-  in with builtins; with env.pkgs.lib; rec {
-    # Produces clean binaries meant to be shipped outside of nix
-    # nix build .#foreign
-    packages.foreign = env.package {
-      src = cleanSource ./.;
+    pkgs = env.pkgs;
+  in rec {
+    # Main package
+    packages.default = env.package {
+      src = pkgs.lib.cleanSource ./.;
 
-      # Packages required for compiling
-      nativeBuildInputs = with env.pkgs; [
+      nativeBuildInputs = with pkgs; [
         pkg-config
       ];
 
-      # Packages required for linking
-      buildInputs = with env.pkgs; [
+      buildInputs = with pkgs; [
         tdlib
       ];
 
-      # Smaller binaries and avoids shipping glibc.
-      zigPreferMusl = true;
+      zigWrapperLibs = with pkgs; [ tdlib ];
+      zigBuildZonLock = ./build.zig.zon2json-lock;
     };
 
-    # nix build .
-    packages.default = packages.foreign.override (attrs: {
-      # Prefer nix friendly settings.
-      zigPreferMusl = false;
+    # Foreign package for distribution (with musl)
+    packages.foreign = env.package {
+      src = pkgs.lib.cleanSource ./.;
 
-      # Executables required for runtime
-      # These packages will be added to the PATH
-      zigWrapperBins = with env.pkgs; [];
-
-      # Libraries required for runtime
-      # These packages will be added to the LD_LIBRARY_PATH
-      zigWrapperLibs = (attrs.buildInputs or []) ++ (with env.pkgs; [ glibc ]);
-      
-      # Ensure proper dynamic linking on NixOS
-      zigWrapperArgs = [
-        "--set LD_LIBRARY_PATH ${env.pkgs.lib.makeLibraryPath ([ env.pkgs.tdlib env.pkgs.glibc ] ++ (attrs.buildInputs or []))}"
+      nativeBuildInputs = with pkgs; [
+        pkg-config
       ];
-    });
+
+      buildInputs = with pkgs; [
+        tdlib
+      ];
+
+      # Smaller binaries and avoids shipping glibc
+      zigPreferMusl = true;
+      zigBuildZonLock = ./build.zig.zon2json-lock;
+    };
 
     # For bundling with nix bundle for running outside of nix
-    # example: https://github.com/ralismark/nix-appimage
     apps.bundle = {
       type = "app";
       program = "${packages.foreign}/bin/zefxi";
@@ -264,12 +238,10 @@
     # nix develop
     devShells.default = env.mkShell {
       # Packages required for compiling, linking and running
-      # Libraries added here will be automatically added to the LD_LIBRARY_PATH and PKG_CONFIG_PATH
-      nativeBuildInputs = []
-        ++ packages.default.nativeBuildInputs
-        ++ packages.default.buildInputs
-        ++ packages.default.zigWrapperBins
-        ++ packages.default.zigWrapperLibs;
+      nativeBuildInputs = with pkgs; [
+        pkg-config
+        tdlib
+      ];
 
       shellHook = ''
         source .env 2>/dev/null || true
