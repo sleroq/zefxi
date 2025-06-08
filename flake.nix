@@ -8,16 +8,13 @@
   outputs = { self, zig2nix, ... }: let
     flake-utils = zig2nix.inputs.flake-utils;
   in {
-    # NixOS module for zefxi
     nixosModules.zefxi = { config, lib, pkgs, ... }:
       with lib;
       let
         cfg = config.services.zefxi;
-        # Get zig2nix environment for this system
         env = zig2nix.outputs.zig-env.${pkgs.system} { 
           zig = zig2nix.outputs.packages.${pkgs.system}.zig-master; 
         };
-        # Build zefxi using zig2nix
         zefxiPackage = env.package {
           src = lib.cleanSource ./.;
           
@@ -84,6 +81,7 @@
               DISCORD_SERVER = "1234567890123456789";
               DISCORD_CHANNEL = "1234567890123456789";
               DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/ID/TOKEN";
+              AVATAR_BASE_URL = "https://bore.pub:44198";
               DEBUG = "1";
             };
           };
@@ -221,7 +219,10 @@
     };
 
     # nix run .
-    apps.default = env.app [] "zig build run -- \"$@\"";
+    apps.default = {
+      type = "app";
+      program = "${packages.default}/bin/zefxi";
+    };
 
     # nix run .#build
     apps.build = env.app [] "zig build \"$@\"";
@@ -252,7 +253,8 @@
         echo "TDLib version: $(pkg-config --modversion tdjson 2>/dev/null || echo 'installed')"
         echo ""
         echo "Available commands:"
-        echo "  nix run .                 - Run the bridge"
+        echo "  nix run .                 - Run the bridge (built package)"
+        echo "  nix develop --command zig build run  - Run in development mode"
         echo "  nix run .#build           - Build the project"
         echo "  nix run .#test            - Run tests"
         echo "  nix run .#docs            - Generate docs"
@@ -266,6 +268,7 @@
         echo "  DISCORD_SERVER        - Your Discord server ID"
         echo "  DISCORD_CHANNEL       - Your Discord channel ID"
         echo "  DISCORD_WEBHOOK_URL   - Your Discord webhook URL (required for user spoofing)"
+        echo "  AVATAR_BASE_URL       - Base URL for avatar server (optional, defaults to localhost)"
         echo ""
       '';
     };

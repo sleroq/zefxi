@@ -27,6 +27,7 @@ pub const Config = struct {
     use_test_dc: bool = false,
     enable_storage_optimizer: bool = true,
     debug_mode: bool = false,
+    avatar_base_url: []const u8 = "http://127.0.0.1:8080",
 };
 
 pub const TelegramError = error{
@@ -923,8 +924,8 @@ pub const TelegramClient = struct {
                                         // Create HTTP URL for the avatar server
                                         const avatar_url = try std.fmt.allocPrint(
                                             self.allocator,
-                                            "http://127.0.0.1:8080/avatar/{s}",
-                                            .{filename}
+                                            "{s}/avatar/{s}",
+                                            .{ self.config.avatar_base_url, filename }
                                         );
                                         
                                         // Set HTTP URL as avatar URL

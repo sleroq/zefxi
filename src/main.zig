@@ -17,6 +17,7 @@ const BridgeConfig = struct {
     discord_webhook_url: []const u8,
     avatar_server_port: u16 = 8080,
     avatar_files_directory: []const u8 = "tdlib/photos",
+    avatar_base_url: []const u8 = "http://127.0.0.1:8080",
 };
 
 const Bridge = struct {
@@ -33,6 +34,7 @@ const Bridge = struct {
         const telegram_config = telegram.Config{
             .debug_mode = config.debug_mode,
             .receive_timeout = 0.1,
+            .avatar_base_url = config.avatar_base_url,
         };
         
         const tg_client = try telegram.TelegramClient.init(
@@ -229,6 +231,7 @@ const Bridge = struct {
         print("Webhook Spoofing: Enabled\n", .{});
         print("Avatar Server Port: {d}\n", .{self.config.avatar_server_port});
         print("Avatar Files Directory: {s}\n", .{self.config.avatar_files_directory});
+        print("Avatar Base URL: {s}\n", .{self.config.avatar_base_url});
         print("Debug mode: {}\n", .{self.config.debug_mode});
         print("Press Ctrl+C to exit\n\n", .{});
 
@@ -394,6 +397,13 @@ pub fn main() !void {
         // Default to false
     }
 
+    // Get avatar base URL (optional, defaults to localhost)
+    const avatar_base_url = std.process.getEnvVarOwned(allocator, "AVATAR_BASE_URL") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => try allocator.dupe(u8, "http://127.0.0.1:8080"),
+        else => return err,
+    };
+    defer allocator.free(avatar_base_url);
+
     const discord_server_id_parsed = Discord.Snowflake.fromRaw(discord_server_id) catch {
         print("Error: DISCORD_SERVER must be a valid Discord snowflake\n", .{});
         return;
@@ -413,6 +423,7 @@ pub fn main() !void {
         .discord_server_id = discord_server_id_parsed,
         .discord_channel_id = discord_channel_id_parsed,
         .discord_webhook_url = discord_webhook_url,
+        .avatar_base_url = avatar_base_url,
     };
 
     var bridge = Bridge.init(allocator, config) catch |err| {

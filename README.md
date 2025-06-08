@@ -60,6 +60,8 @@ nix develop
    export TELEGRAM_CHAT_ID="supergroup_id_to_bridge"  # Optional, monitors all chats if not set
    export DISCORD_TOKEN="your_discord_bot_token"
    export DISCORD_CHANNEL="channel_id_to_bridge"
+   export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"  # Required for user spoofing
+   export AVATAR_BASE_URL="https://bore.pub:44198"   # Optional, defaults to http://127.0.0.1:8080
    export DEBUG="1"                                   # Optional, enables debug logging
    ```
 
@@ -90,6 +92,8 @@ export TELEGRAM_API_HASH="your_api_hash"
 export TELEGRAM_CHAT_ID="supergroup_id_to_bridge"  # Optional
 export DISCORD_TOKEN="your_discord_bot_token"
 export DISCORD_CHANNEL="channel_id_to_bridge"
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"  # Required for user spoofing
+export AVATAR_BASE_URL="https://bore.pub:44198"  # Optional, defaults to http://127.0.0.1:8080
 export DEBUG="1"  # Optional, enables detailed logging
 ```
 
