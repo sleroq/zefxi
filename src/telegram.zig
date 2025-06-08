@@ -47,9 +47,7 @@ pub const UserInfo = struct {
     avatar_url: ?[]const u8,
     
     pub fn getDisplayName(self: UserInfo, allocator: Allocator) ![]u8 {
-        if (self.username) |uname| {
-            return std.fmt.allocPrint(allocator, "@{s}", .{uname});
-        } else if (self.last_name) |lname| {
+        if (self.last_name) |lname| {
             return std.fmt.allocPrint(allocator, "{s} {s}", .{ self.first_name, lname });
         } else {
             return std.fmt.allocPrint(allocator, "{s}", .{self.first_name});

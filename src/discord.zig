@@ -132,6 +132,24 @@ pub const WebhookExecutor = struct {
         
         try self.executeWebhook(payload);
     }
+    
+    pub fn sendSpoofedMessageWithAnimation(self: *Self, content: ?[]const u8, username: ?[]const u8, avatar_url: ?[]const u8, animation_url: []const u8) !void {
+        // For animations/GIFs, Discord needs the URL in the message content for auto-embedding
+        // Don't use embed.image as it doesn't work properly for animated content
+        const message_content = if (content) |caption|
+            try std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ caption, animation_url })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}", .{animation_url});
+        defer self.allocator.free(message_content);
+        
+        const payload = WebhookExecutePayload{
+            .content = message_content,
+            .username = username,
+            .avatar_url = avatar_url,
+        };
+        
+        try self.executeWebhook(payload);
+    }
 };
 
 // Global state for the Discord client (needed for callbacks)
@@ -207,10 +225,15 @@ pub const DiscordClient = struct {
         if (message.channel_id != client.target_channel_id) return;
         
         const content = message.content orelse "";
-        const username = message.author.username;
+        
+        // Prioritize display name (global_name) over username for more natural names
+        const display_name = if (message.author.global_name) |global_name|
+            global_name
+        else
+            message.author.username;
         
         print("[Discord] NEW MESSAGE: Channel {}, User {s} ({}): {s}\n", .{ 
-            message.channel_id, username, message.author.id, content 
+            message.channel_id, display_name, message.author.id, content 
         });
         
         // Call the message handler if set
@@ -223,7 +246,7 @@ pub const DiscordClient = struct {
                 const user_id_str = std.fmt.allocPrint(client.allocator, "{}", .{message.author.id}) catch return;
                 defer client.allocator.free(user_id_str);
                 
-                handler(ctx, channel_id_str, user_id_str, username, content);
+                handler(ctx, channel_id_str, user_id_str, display_name, content);
             }
         }
     }
