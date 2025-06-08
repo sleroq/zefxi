@@ -141,8 +141,9 @@ pub const TelegramClient = struct {
         
         try self.send(request);
         
+        print("[Telegram] 📤 Requested user info for {d}\n", .{user_id});
         if (self.config.debug_mode) {
-            print("[Telegram] Requested user info for {d}\n", .{user_id});
+            print("[Telegram] User info request: {s}\n", .{request});
         }
     }
 
@@ -152,9 +153,29 @@ pub const TelegramClient = struct {
         
         try self.send(request);
         
+        print("[Telegram] 📤 Requested profile photos for {d}\n", .{user_id});
         if (self.config.debug_mode) {
-            print("[Telegram] Requested profile photos for {d}\n", .{user_id});
+            print("[Telegram] Profile photos request: {s}\n", .{request});
         }
+    }
+
+    pub fn downloadFile(self: *Self, file_id: i32, priority: i32, extra: []const u8) !void {
+        const request = try std.fmt.allocPrint(self.allocator, "{{\"@type\":\"downloadFile\",\"file_id\":{d},\"priority\":{d},\"offset\":0,\"limit\":0,\"synchronous\":true,\"@extra\":\"{s}\"}}", .{ file_id, priority, extra });
+        defer self.allocator.free(request);
+        
+        try self.send(request);
+        
+        print("[Telegram] 📥 Requested file download for file_id {d} with extra: {s}\n", .{ file_id, extra });
+        if (self.config.debug_mode) {
+            print("[Telegram] Download request: {s}\n", .{request});
+        }
+    }
+
+    pub fn getAvatarLocalPath(self: *Self, user_id: i64) ?[]const u8 {
+        if (self.user_cache.get(user_id)) |user_info| {
+            return user_info.avatar_url;
+        }
+        return null;
     }
 
     pub fn start(self: *Self) !void {
@@ -377,13 +398,22 @@ pub const TelegramClient = struct {
         } else if (std.mem.eql(u8, update_type, "user")) {
             try self.handleUser(root);
         } else if (std.mem.eql(u8, update_type, "userProfilePhotos")) {
+            print("[Telegram] 📸 Received userProfilePhotos update\n", .{});
             try self.handleUserProfilePhotos(root);
+        } else if (std.mem.eql(u8, update_type, "chatPhotos")) {
+            print("[Telegram] 📸 Received chatPhotos update\n", .{});
+            try self.handleChatPhotos(root);
         } else if (std.mem.eql(u8, update_type, "file")) {
+            print("[Telegram] 📁 Received file update\n", .{});
             try self.handleFile(root);
         } else if (std.mem.eql(u8, update_type, "error")) {
             try self.handleError(root);
+        } else {
+            // Log unknown update types when debug mode is on
+            if (self.config.debug_mode) {
+                print("[Telegram] 🔍 Unknown update type: {s}\n", .{update_type});
+            }
         }
-        // Silently ignore unknown update types
     }
 
     fn handleAuthorizationState(self: *Self, root: std.json.ObjectMap) !void {
@@ -444,14 +474,9 @@ pub const TelegramClient = struct {
         if (root.get("message")) |message| {
             const msg_obj = message.object;
             
-            // Log the full message JSON if debug mode is enabled
+            // Log message processing if debug mode is enabled
             if (self.config.debug_mode) {
-                const message_json = std.json.stringifyAlloc(self.allocator, message, .{}) catch |err| {
-                    print("[Telegram] Failed to stringify message JSON: {}\n", .{err});
-                    return;
-                };
-                defer self.allocator.free(message_json);
-                print("[Telegram] Message JSON: {s}\n", .{message_json});
+                print("[Telegram] Processing new message\n", .{});
             }
             
             var message_chat_id: i64 = 0;
@@ -509,6 +534,7 @@ pub const TelegramClient = struct {
                 // Request user info and cache the message for later processing
                 try self.requestUserInfo(user_id);
                 try self.requestUserProfilePhotos(user_id);
+
                 
                 if (self.config.debug_mode) {
                     print("[Telegram] User info not cached for {d}, requested info\n", .{user_id});
@@ -650,59 +676,289 @@ pub const TelegramClient = struct {
     }
 
     fn handleUserProfilePhotos(self: *Self, root: std.json.ObjectMap) !void {
+        if (self.config.debug_mode) {
+            print("[Telegram] handleUserProfilePhotos called\n", .{});
+        }
+        
         if (root.get("@extra")) |extra| {
             const extra_str = extra.string;
+            if (self.config.debug_mode) {
+                print("[Telegram] Profile photos extra: {s}\n", .{extra_str});
+            }
+            
             if (std.mem.startsWith(u8, extra_str, "photos_")) {
                 const user_id_str = extra_str[7..];
-                const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch return;
+                const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
+                    if (self.config.debug_mode) {
+                        print("[Telegram] Failed to parse user ID from extra: {s}, error: {}\n", .{ user_id_str, err });
+                    }
+                    return;
+                };
+                
+                if (self.config.debug_mode) {
+                    print("[Telegram] Processing profile photos for user {d}\n", .{user_id});
+                }
                 
                 if (root.get("photos")) |photos| {
                     const photos_array = photos.array;
+                    if (self.config.debug_mode) {
+                        print("[Telegram] Found {d} photos for user {d}\n", .{ photos_array.items.len, user_id });
+                    }
+                    
                     if (photos_array.items.len > 0) {
+                        const first_photo = photos_array.items[0].object;
+                        if (self.config.debug_mode) {
+                            print("[Telegram] Processing first photo for user {d}\n", .{user_id});
+                        }
+                        
+                        if (first_photo.get("sizes")) |sizes| {
+                            const sizes_array = sizes.array;
+                            if (self.config.debug_mode) {
+                                print("[Telegram] Found {d} photo sizes\n", .{sizes_array.items.len});
+                            }
+                            
+                            if (sizes_array.items.len > 0) {
+                                // Get the largest size
+                                const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
+                                if (self.config.debug_mode) {
+                                    print("[Telegram] Processing largest size (index {d})\n", .{sizes_array.items.len - 1});
+                                }
+                                
+                                if (largest_size.get("photo")) |photo| {
+                                    const photo_obj = photo.object;
+                                    if (self.config.debug_mode) {
+                                        print("[Telegram] Found photo object\n", .{});
+                                    }
+                                    
+                                    if (photo_obj.get("remote")) |remote| {
+                                        const remote_obj = remote.object;
+                                        if (self.config.debug_mode) {
+                                            print("[Telegram] Found remote object\n", .{});
+                                        }
+                                        
+                                        if (remote_obj.get("unique_id")) |unique_id| {
+                                            print("[Telegram] Using unique_id for avatar: {s}\n", .{unique_id.string});
+                                            
+                                            // The t.me/i/userpic URLs don't work reliably
+                                            // Instead, we need to use the actual file ID with Telegram Bot API
+                                            // or download the file through TDLib
+                                            
+                                            // For now, let's try to construct a working URL
+                                            // Option 1: Try to use the file ID directly (this requires a bot token)
+                                            // Option 2: Download the file and serve it locally
+                                            // Option 3: Use a placeholder or fallback
+                                            
+                                            print("[Telegram] ⚠️  Telegram profile pictures require special handling\n", .{});
+                                            print("[Telegram] File ID: {s}\n", .{remote_obj.get("id").?.string});
+                                            print("[Telegram] Unique ID: {s}\n", .{unique_id.string});
+                                            
+                                            // For now, let's not set an avatar URL since the t.me URLs don't work
+                                            // This will make Discord use the default avatar
+                                            print("[Telegram] ❌ Skipping avatar URL - Telegram profile pics need bot token or file download\n", .{});
+                                            
+                                            // TODO: Implement one of these solutions:
+                                            // 1. Use Telegram Bot API with bot token to get file URL
+                                            // 2. Download file through TDLib and serve locally
+                                            // 3. Use a different avatar service
+                                        }
+                                        
+                                        // Also check for other potential ID fields
+                                        if (remote_obj.get("id")) |id| {
+                                            print("[Telegram] Remote ID: {s}\n", .{id.string});
+                                        }
+                                        if (remote_obj.get("url")) |url| {
+                                            print("[Telegram] Remote URL: {s}\n", .{url.string});
+                                        }
+                                    }
+                                }
+                            } else {
+                                if (self.config.debug_mode) {
+                                    print("[Telegram] ❌ No sizes found in photo\n", .{});
+                                }
+                            }
+                        } else {
+                            if (self.config.debug_mode) {
+                                print("[Telegram] ❌ No sizes array found in photo\n", .{});
+                            }
+                        }
+                    } else {
+                        if (self.config.debug_mode) {
+                            print("[Telegram] ❌ User {d} has no profile photos\n", .{user_id});
+                        }
+                    }
+                } else {
+                    if (self.config.debug_mode) {
+                        print("[Telegram] ❌ No photos array found in response\n", .{});
+                    }
+                }
+            } else {
+                if (self.config.debug_mode) {
+                    print("[Telegram] ❌ Extra string doesn't start with 'photos_': {s}\n", .{extra_str});
+                }
+            }
+        } else {
+            if (self.config.debug_mode) {
+                print("[Telegram] ❌ No @extra field found in profile photos response\n", .{});
+            }
+        }
+    }
+
+    fn handleChatPhotos(self: *Self, root: std.json.ObjectMap) !void {
+        print("[Telegram] 📸 Processing chat photos response\n", .{});
+        
+        if (root.get("@extra")) |extra| {
+            const extra_str = extra.string;
+            print("[Telegram] Chat photos extra: {s}\n", .{extra_str});
+            
+            if (std.mem.startsWith(u8, extra_str, "photos_")) {
+                const user_id_str = extra_str[7..];
+                const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
+                    print("[Telegram] Failed to parse user ID from extra: {s}, error: {}\n", .{ user_id_str, err });
+                    return;
+                };
+                
+                print("[Telegram] Processing chat photos for user {d}\n", .{user_id});
+                
+                if (root.get("photos")) |photos| {
+                    const photos_array = photos.array;
+                    print("[Telegram] Found {d} chat photos for user {d}\n", .{ photos_array.items.len, user_id });
+                    
+                    if (photos_array.items.len > 0) {
+                        // Get the first photo
                         const first_photo = photos_array.items[0].object;
                         if (first_photo.get("sizes")) |sizes| {
                             const sizes_array = sizes.array;
                             if (sizes_array.items.len > 0) {
                                 // Get the largest size
                                 const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
+                                
                                 if (largest_size.get("photo")) |photo| {
                                     const photo_obj = photo.object;
-                                    if (photo_obj.get("remote")) |remote| {
-                                        const remote_obj = remote.object;
-                                        if (remote_obj.get("unique_id")) |unique_id| {
-                                            // Generate a Telegram avatar URL
-                                            const avatar_url = try std.fmt.allocPrint(
-                                                self.allocator,
-                                                "https://t.me/i/userpic/320/{s}.jpg",
-                                                .{unique_id.string}
-                                            );
-                                            
-                                            // Update user cache with avatar URL
-                                            if (self.user_cache.getPtr(user_id)) |user_info| {
-                                                if (user_info.avatar_url) |old_url| {
-                                                    self.allocator.free(old_url);
-                                                }
-                                                user_info.avatar_url = avatar_url;
-                                                
-                                                if (self.config.debug_mode) {
-                                                    print("[Telegram] Set avatar URL for user {d}: {s}\n", .{ user_id, avatar_url });
-                                                }
+                                    
+                                    if (photo_obj.get("id")) |file_id_value| {
+                                        const file_id = @as(i32, @intCast(file_id_value.integer));
+                                        print("[Telegram] 📥 Starting download for file_id {d} (user {d})\n", .{ file_id, user_id });
+                                        
+                                        // Get unique_id for identification
+                                        var unique_id_str: []const u8 = "unknown";
+                                        if (photo_obj.get("remote")) |remote| {
+                                            const remote_obj = remote.object;
+                                            if (remote_obj.get("unique_id")) |unique_id| {
+                                                unique_id_str = unique_id.string;
                                             }
                                         }
+                                        
+                                        // Create extra data to identify this download
+                                        const download_extra = try std.fmt.allocPrint(
+                                            self.allocator,
+                                            "avatar_{d}_{s}",
+                                            .{ user_id, unique_id_str }
+                                        );
+                                        defer self.allocator.free(download_extra);
+                                        
+                                        // Download the file with high priority (32 = high priority)
+                                        try self.downloadFile(file_id, 32, download_extra);
+                                        
+                                        print("[Telegram] 📤 Requested download for avatar file_id {d}\n", .{file_id});
+                                    } else {
+                                        print("[Telegram] ❌ No file ID found in photo object\n", .{});
                                     }
                                 }
                             }
                         }
+                    } else {
+                        print("[Telegram] ❌ User {d} has no chat photos\n", .{user_id});
                     }
+                } else {
+                    print("[Telegram] ❌ No photos array found in chatPhotos response\n", .{});
                 }
+            } else {
+                print("[Telegram] ❌ Extra string doesn't start with 'photos_': {s}\n", .{extra_str});
             }
+        } else {
+            print("[Telegram] ❌ No @extra field found in chatPhotos response\n", .{});
         }
     }
 
     fn handleFile(self: *Self, root: std.json.ObjectMap) !void {
-        // This can be used to handle downloaded profile photos if needed
-        _ = self;
-        _ = root;
+        print("[Telegram] 📁 Processing file download response\n", .{});
+        
+        if (root.get("@extra")) |extra| {
+            const extra_str = extra.string;
+            print("[Telegram] File extra: {s}\n", .{extra_str});
+            
+            // Check if this is an avatar download
+            if (std.mem.startsWith(u8, extra_str, "avatar_")) {
+                // Parse user_id from extra string: "avatar_{user_id}_{unique_id}"
+                var parts = std.mem.splitScalar(u8, extra_str, '_');
+                _ = parts.next(); // skip "avatar"
+                if (parts.next()) |user_id_str| {
+                    const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
+                        print("[Telegram] Failed to parse user ID from file extra: {s}, error: {}\n", .{ user_id_str, err });
+                        return;
+                    };
+                    
+                    print("[Telegram] Processing avatar download for user {d}\n", .{user_id});
+                    
+                    // Check if file was downloaded successfully
+                    if (root.get("local")) |local| {
+                        const local_obj = local.object;
+                        
+                        if (local_obj.get("is_downloading_completed")) |is_completed| {
+                            if (is_completed.bool) {
+                                if (local_obj.get("path")) |path| {
+                                    const file_path = path.string;
+                                    print("[Telegram] ✅ Avatar downloaded successfully: {s}\n", .{file_path});
+                                    
+                                    // Update user cache with local file path
+                                    if (self.user_cache.getPtr(user_id)) |user_info| {
+                                        // Free old avatar URL if it exists
+                                        if (user_info.avatar_url) |old_url| {
+                                            self.allocator.free(old_url);
+                                        }
+                                        
+                                        // Extract just the filename from the path
+                                        const filename = std.fs.path.basename(file_path);
+                                        
+                                        // Create HTTP URL for the avatar server
+                                        const avatar_url = try std.fmt.allocPrint(
+                                            self.allocator,
+                                            "http://127.0.0.1:8080/avatar/{s}",
+                                            .{filename}
+                                        );
+                                        
+                                        // Set HTTP URL as avatar URL
+                                        user_info.avatar_url = avatar_url;
+                                        
+                                        print("[Telegram] 🖼️  Updated avatar for user {d}: {s}\n", .{ user_id, file_path });
+                                    } else {
+                                        print("[Telegram] ⚠️  User {d} not found in cache when setting avatar\n", .{user_id});
+                                    }
+                                } else {
+                                    print("[Telegram] ❌ No path found in downloaded file\n", .{});
+                                }
+                            } else {
+                                print("[Telegram] ⏳ Avatar download still in progress for user {d}\n", .{user_id});
+                            }
+                        } else {
+                            print("[Telegram] ❌ No download completion status found\n", .{});
+                        }
+                    } else {
+                        print("[Telegram] ❌ No local file info found\n", .{});
+                    }
+                } else {
+                    print("[Telegram] ❌ Failed to parse user ID from avatar extra: {s}\n", .{extra_str});
+                }
+            } else {
+                if (self.config.debug_mode) {
+                    print("[Telegram] File download not related to avatar: {s}\n", .{extra_str});
+                }
+            }
+        } else {
+            if (self.config.debug_mode) {
+                print("[Telegram] File response has no @extra field\n", .{});
+            }
+        }
     }
 
     fn handleError(self: *Self, root: std.json.ObjectMap) !void {
@@ -752,4 +1008,6 @@ pub const TelegramClient = struct {
         
         return true;
     }
+
+
 }; 

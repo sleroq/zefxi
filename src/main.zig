@@ -3,6 +3,7 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const telegram = @import("telegram.zig");
 const discord = @import("discord.zig");
+const http_server = @import("http_server.zig");
 const Discord = @import("discord");
 
 const BridgeConfig = struct {
@@ -14,6 +15,8 @@ const BridgeConfig = struct {
     discord_server_id: Discord.Snowflake,
     discord_channel_id: Discord.Snowflake,
     discord_webhook_url: []const u8,
+    avatar_server_port: u16 = 8080,
+    avatar_files_directory: []const u8 = "tdlib/photos",
 };
 
 const Bridge = struct {
@@ -22,6 +25,7 @@ const Bridge = struct {
     telegram_client: telegram.TelegramClient,
     discord_client: discord.DiscordClient,
     webhook_executor: discord.WebhookExecutor,
+    avatar_server: http_server.HttpServer,
     
     const Self = @This();
 
@@ -54,12 +58,21 @@ const Bridge = struct {
             config.debug_mode
         );
         
+        // Create avatar HTTP server
+        const avatar_srv = http_server.HttpServer.init(
+            allocator,
+            config.avatar_server_port,
+            config.avatar_files_directory,
+            config.debug_mode
+        );
+        
         return Self{
             .allocator = allocator,
             .config = config,
             .telegram_client = tg_client,
             .discord_client = dc_client,
             .webhook_executor = webhook_exec,
+            .avatar_server = avatar_srv,
         };
     }
 
@@ -100,6 +113,16 @@ const Bridge = struct {
             chat_id, display_name, user_info.user_id, message_text 
         });
         
+        // Debug user info
+        if (self.config.debug_mode) {
+            print("[Bridge] 🔍 User info debug:\n", .{});
+            print("[Bridge]   - user_id: {d}\n", .{user_info.user_id});
+            print("[Bridge]   - first_name: {s}\n", .{user_info.first_name});
+            print("[Bridge]   - last_name: {?s}\n", .{user_info.last_name});
+            print("[Bridge]   - username: {?s}\n", .{user_info.username});
+            print("[Bridge]   - avatar_url: {?s}\n", .{user_info.avatar_url});
+        }
+        
         // Skip empty messages
         if (message_text.len == 0) {
             return;
@@ -112,6 +135,11 @@ const Bridge = struct {
         // Use webhook spoofing (now always available)
         if (self.config.debug_mode) {
             print("[Bridge] Using webhook spoofing for user: {s}\n", .{display_name});
+            if (user_info.avatar_url) |avatar| {
+                print("[Bridge] 🖼️  Using avatar: {s}\n", .{avatar});
+            } else {
+                print("[Bridge] ❌ No avatar available for user {d}\n", .{user_info.user_id});
+            }
         }
         
         self.webhook_executor.sendSpoofedMessage(
@@ -199,6 +227,8 @@ const Bridge = struct {
         print("Telegram Chat ID: {?d}\n", .{self.config.telegram_chat_id});
         print("Discord Channel ID: {s}\n", .{self.config.discord_channel_id});
         print("Webhook Spoofing: Enabled\n", .{});
+        print("Avatar Server Port: {d}\n", .{self.config.avatar_server_port});
+        print("Avatar Files Directory: {s}\n", .{self.config.avatar_files_directory});
         print("Debug mode: {}\n", .{self.config.debug_mode});
         print("Press Ctrl+C to exit\n\n", .{});
 
@@ -208,6 +238,11 @@ const Bridge = struct {
         
         // Set up webhook executor in Discord client
         self.discord_client.setWebhookExecutor(self.webhook_executor);
+
+        // Start avatar HTTP server in a separate thread
+        print("[Bridge] Starting avatar HTTP server...\n", .{});
+        const avatar_server_thread = try std.Thread.spawn(.{}, startAvatarServer, .{&self.avatar_server});
+        defer avatar_server_thread.join();
 
         // Start Telegram client
         print("[Bridge] Starting Telegram client...\n", .{});
@@ -219,7 +254,7 @@ const Bridge = struct {
         defer discord_thread.join();
 
         // Main event loop for Telegram
-        print("[Bridge] Bridge is now running with user spoofing!\n", .{});
+        print("[Bridge] Bridge is now running with user spoofing and avatar server!\n", .{});
         while (true) {
             if (!try self.telegram_client.tick()) {
                 break;
@@ -233,6 +268,12 @@ const Bridge = struct {
     fn startDiscordClient(client: *discord.DiscordClient) void {
         client.start() catch |err| {
             print("[Bridge] Discord client error: {}\n", .{err});
+        };
+    }
+
+    fn startAvatarServer(server: *http_server.HttpServer) void {
+        server.start() catch |err| {
+            print("[Bridge] Avatar server error: {}\n", .{err});
         };
     }
 };
