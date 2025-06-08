@@ -57,7 +57,67 @@ pub const UserInfo = struct {
     }
 };
 
-pub const MessageHandler = *const fn (ctx: *anyopaque, chat_id: i64, user_info: UserInfo, message_text: []const u8) void;
+// Structure to hold image information for bridging
+pub const ImageInfo = struct {
+    file_id: i32,
+    width: i32,
+    height: i32,
+    caption: ?[]const u8,
+    local_path: ?[]const u8,
+    url: ?[]const u8,
+    
+    pub fn deinit(self: *ImageInfo, allocator: Allocator) void {
+        if (self.caption) |caption| {
+            allocator.free(caption);
+        }
+        if (self.local_path) |path| {
+            allocator.free(path);
+        }
+        if (self.url) |url| {
+            allocator.free(url);
+        }
+    }
+};
+
+// Message content types
+pub const MessageContent = union(enum) {
+    text: []const u8,
+    photo: ImageInfo,
+    text_with_photo: struct {
+        text: []const u8,
+        photo: ImageInfo,
+    },
+};
+
+// Pending image message for when download completes
+pub const PendingImageMessage = struct {
+    chat_id: i64,
+    user_info: UserInfo,
+    content: MessageContent,
+    
+    pub fn deinit(self: *PendingImageMessage, allocator: Allocator) void {
+        // Clean up user info
+        allocator.free(self.user_info.first_name);
+        if (self.user_info.last_name) |lname| {
+            allocator.free(lname);
+        }
+        if (self.user_info.username) |uname| {
+            allocator.free(uname);
+        }
+        if (self.user_info.avatar_url) |avatar| {
+            allocator.free(avatar);
+        }
+        
+        // Clean up content
+        switch (self.content) {
+            .photo => |*photo| photo.deinit(allocator),
+            .text_with_photo => |*text_photo| text_photo.photo.deinit(allocator),
+            .text => {},
+        }
+    }
+};
+
+pub const MessageHandler = *const fn (ctx: *anyopaque, chat_id: i64, user_info: UserInfo, content: MessageContent) void;
 
 pub const TelegramClient = struct {
     allocator: Allocator,
@@ -74,6 +134,7 @@ pub const TelegramClient = struct {
     my_user_id: ?i64,
     user_cache: std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage),
     pending_requests: std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    pending_images: std.HashMap(i32, PendingImageMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage),
     
     const Self = @This();
 
@@ -93,6 +154,7 @@ pub const TelegramClient = struct {
             .my_user_id = null,
             .user_cache = std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage).init(allocator),
             .pending_requests = std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .pending_images = std.HashMap(i32, PendingImageMessage, std.hash_map.AutoContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
         };
     }
 
@@ -125,6 +187,13 @@ pub const TelegramClient = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.pending_requests.deinit();
+        
+        // Clean up pending images
+        var img_iterator = self.pending_images.iterator();
+        while (img_iterator.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.pending_images.deinit();
     }
 
     pub fn setMessageHandler(self: *Self, ctx: *anyopaque, handler: MessageHandler) void {
@@ -510,25 +579,164 @@ pub const TelegramClient = struct {
                 }
             }
             
+            // Parse message content (text, photo, or both)
+            var message_content: ?MessageContent = null;
             var message_text: []const u8 = "";
+            
             if (msg_obj.get("content")) |content| {
                 const content_obj = content.object;
-                if (content_obj.get("text")) |text| {
-                    const text_obj = text.object;
-                    if (text_obj.get("text")) |text_content| {
-                        message_text = text_content.string;
+                
+                if (content_obj.get("@type")) |content_type| {
+                    const type_str = content_type.string;
+                    
+                    if (std.mem.eql(u8, type_str, "messageText")) {
+                        // Text message
+                        if (content_obj.get("text")) |text| {
+                            const text_obj = text.object;
+                            if (text_obj.get("text")) |text_content| {
+                                message_text = text_content.string;
+                                message_content = MessageContent{ .text = message_text };
+                            }
+                        }
+                    } else if (std.mem.eql(u8, type_str, "messagePhoto")) {
+                        // Photo message
+                        if (self.config.debug_mode) {
+                            print("[Telegram] 📸 Processing photo message\n", .{});
+                        }
+                        
+                        var caption: ?[]const u8 = null;
+                        if (content_obj.get("caption")) |caption_obj| {
+                            const caption_text_obj = caption_obj.object;
+                            if (caption_text_obj.get("text")) |caption_text| {
+                                caption = caption_text.string;
+                                message_text = caption orelse ""; // For logging purposes
+                            }
+                        }
+                        
+                        if (content_obj.get("photo")) |photo| {
+                            const photo_obj = photo.object;
+                            
+                            // Get the largest photo size
+                            if (photo_obj.get("sizes")) |sizes| {
+                                const sizes_array = sizes.array;
+                                if (sizes_array.items.len > 0) {
+                                    // Get the largest size (last in array)
+                                    const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
+                                    
+                                    if (largest_size.get("photo")) |size_photo| {
+                                        const size_photo_obj = size_photo.object;
+                                        
+                                        var file_id: i32 = 0;
+                                        var width: i32 = 0;
+                                        var height: i32 = 0;
+                                        
+                                        if (size_photo_obj.get("id")) |id| {
+                                            file_id = @as(i32, @intCast(id.integer));
+                                        }
+                                        
+                                        if (largest_size.get("width")) |w| {
+                                            width = @as(i32, @intCast(w.integer));
+                                        }
+                                        
+                                        if (largest_size.get("height")) |h| {
+                                            height = @as(i32, @intCast(h.integer));
+                                        }
+                                        
+                                        const image_info = ImageInfo{
+                                            .file_id = file_id,
+                                            .width = width,
+                                            .height = height,
+                                            .caption = if (caption) |cap| try self.allocator.dupe(u8, cap) else null,
+                                            .local_path = null,
+                                            .url = null,
+                                        };
+                                        
+                                        if (caption) |cap| {
+                                            message_content = MessageContent{ .text_with_photo = .{
+                                                .text = cap,
+                                                .photo = image_info,
+                                            }};
+                                        } else {
+                                            message_content = MessageContent{ .photo = image_info };
+                                        }
+                                        
+                                        // Start downloading the image
+                                        const download_extra = try std.fmt.allocPrint(
+                                            self.allocator,
+                                            "image_{d}_{d}_{d}",
+                                            .{ message_chat_id, user_id, file_id }
+                                        );
+                                        defer self.allocator.free(download_extra);
+                                        
+                                        try self.downloadFile(file_id, 32, download_extra);
+                                        
+                                        if (self.config.debug_mode) {
+                                            print("[Telegram] 📥 Started download for image file_id {d} ({d}x{d})\n", .{ file_id, width, height });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Other message types - treat as text for now
+                        if (self.config.debug_mode) {
+                            print("[Telegram] 🔍 Unsupported message type: {s}\n", .{type_str});
+                        }
+                        message_content = MessageContent{ .text = "" };
                     }
                 }
+            }
+            
+            // Default to empty text if no content was parsed
+            if (message_content == null) {
+                message_content = MessageContent{ .text = "" };
             }
             
             print("[Telegram] NEW MESSAGE: Chat {d}, User {d}: {s}\n", .{ message_chat_id, user_id, message_text });
             
             // Get or request user info
             if (self.getUserInfo(user_id)) |user_info| {
-                // We have user info, call the handler
-                if (self.message_handler) |handler| {
-                    if (self.message_handler_ctx) |ctx| {
-                        handler(ctx, message_chat_id, user_info, message_text);
+                // We have user info, check if we need to wait for image download
+                const should_wait_for_image = switch (message_content.?) {
+                    .photo => |photo| photo.url == null,
+                    .text_with_photo => |text_photo| text_photo.photo.url == null,
+                    .text => false,
+                };
+                
+                if (should_wait_for_image) {
+                    // Store pending image message
+                    const file_id = switch (message_content.?) {
+                        .photo => |photo| photo.file_id,
+                        .text_with_photo => |text_photo| text_photo.photo.file_id,
+                        .text => unreachable,
+                    };
+                    
+                    // Clone user info for storage
+                    const cloned_user = UserInfo{
+                        .user_id = user_info.user_id,
+                        .first_name = try self.allocator.dupe(u8, user_info.first_name),
+                        .last_name = if (user_info.last_name) |lname| try self.allocator.dupe(u8, lname) else null,
+                        .username = if (user_info.username) |uname| try self.allocator.dupe(u8, uname) else null,
+                        .avatar_url = if (user_info.avatar_url) |avatar| try self.allocator.dupe(u8, avatar) else null,
+                    };
+                    
+                    const pending_msg = PendingImageMessage{
+                        .chat_id = message_chat_id,
+                        .user_info = cloned_user,
+                        .content = message_content.?,
+                    };
+                    
+                    try self.pending_images.put(file_id, pending_msg);
+                    
+                    if (self.config.debug_mode) {
+                        print("[Telegram] Stored pending image message for file_id {d}\n", .{file_id});
+                    }
+                } else {
+                    // Image is ready or it's a text message, call the handler immediately
+                    if (self.message_handler) |handler| {
+                        if (self.message_handler_ctx) |ctx| {
+                            handler(ctx, message_chat_id, user_info, message_content.?);
+                        }
                     }
                 }
             } else {
@@ -548,14 +756,43 @@ pub const TelegramClient = struct {
                     .avatar_url = null,
                 };
                 
-                if (self.message_handler) |handler| {
-                    if (self.message_handler_ctx) |ctx| {
-                        handler(ctx, message_chat_id, minimal_user, message_text);
-                    }
-                }
+                // Check if we need to wait for image download
+                const should_wait_for_image = switch (message_content.?) {
+                    .photo => |photo| photo.url == null,
+                    .text_with_photo => |text_photo| text_photo.photo.url == null,
+                    .text => false,
+                };
                 
-                // Clean up the minimal user info
-                self.allocator.free(minimal_user.first_name);
+                if (should_wait_for_image) {
+                    // Store pending image message with minimal user info
+                    const file_id = switch (message_content.?) {
+                        .photo => |photo| photo.file_id,
+                        .text_with_photo => |text_photo| text_photo.photo.file_id,
+                        .text => unreachable,
+                    };
+                    
+                    const pending_msg = PendingImageMessage{
+                        .chat_id = message_chat_id,
+                        .user_info = minimal_user,
+                        .content = message_content.?,
+                    };
+                    
+                    try self.pending_images.put(file_id, pending_msg);
+                    
+                    if (self.config.debug_mode) {
+                        print("[Telegram] Stored pending image message with minimal user info for file_id {d}\n", .{file_id});
+                    }
+                } else {
+                    // Text message or image is ready, call handler immediately
+                    if (self.message_handler) |handler| {
+                        if (self.message_handler_ctx) |ctx| {
+                            handler(ctx, message_chat_id, minimal_user, message_content.?);
+                        }
+                    }
+                    
+                    // Clean up the minimal user info
+                    self.allocator.free(minimal_user.first_name);
+                }
             }
         }
     }
@@ -959,9 +1196,114 @@ pub const TelegramClient = struct {
                 } else {
                     print("[Telegram] ❌ Failed to parse user ID from avatar extra: {s}\n", .{extra_str});
                 }
+            } else if (std.mem.startsWith(u8, extra_str, "image_")) {
+                // Parse image download: "image_{chat_id}_{user_id}_{file_id}"
+                var parts = std.mem.splitScalar(u8, extra_str, '_');
+                _ = parts.next(); // skip "image"
+                
+                if (parts.next()) |chat_id_str| {
+                    if (parts.next()) |user_id_str| {
+                        if (parts.next()) |file_id_str| {
+                            const chat_id = std.fmt.parseInt(i64, chat_id_str, 10) catch |err| {
+                                print("[Telegram] Failed to parse chat ID from image extra: {s}, error: {}\n", .{ chat_id_str, err });
+                                return;
+                            };
+                            
+                            const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch |err| {
+                                print("[Telegram] Failed to parse user ID from image extra: {s}, error: {}\n", .{ user_id_str, err });
+                                return;
+                            };
+                            
+                            const file_id = std.fmt.parseInt(i32, file_id_str, 10) catch |err| {
+                                print("[Telegram] Failed to parse file ID from image extra: {s}, error: {}\n", .{ file_id_str, err });
+                                return;
+                            };
+                            
+                            if (self.config.debug_mode) {
+                                print("[Telegram] Processing image download for chat {d}, user {d}, file {d}\n", .{ chat_id, user_id, file_id });
+                            }
+                            
+                            // Check if file was downloaded successfully
+                            if (root.get("local")) |local| {
+                                const local_obj = local.object;
+                                
+                                if (local_obj.get("is_downloading_completed")) |is_completed| {
+                                    if (is_completed.bool) {
+                                        if (local_obj.get("path")) |path| {
+                                            const file_path = path.string;
+                                            print("[Telegram] 📸 Image downloaded successfully: {s}\n", .{file_path});
+                                            
+                                            // Extract just the filename from the path
+                                            const filename = std.fs.path.basename(file_path);
+                                            
+                                            // Create HTTP URL for the image server
+                                            const image_url = try std.fmt.allocPrint(
+                                                self.allocator,
+                                                "{s}/avatar/{s}",
+                                                .{ self.config.avatar_base_url, filename }
+                                            );
+                                            defer self.allocator.free(image_url);
+                                            
+                                            print("[Telegram] 🌐 Image available at: {s}\n", .{image_url});
+                                            
+                                            // Check if we have a pending message for this file
+                                            if (self.pending_images.getPtr(file_id)) |pending_msg| {
+                                                // Update the image URL in the pending message
+                                                switch (pending_msg.content) {
+                                                    .photo => |*photo| {
+                                                        if (photo.url) |old_url| {
+                                                            self.allocator.free(old_url);
+                                                        }
+                                                        photo.url = try self.allocator.dupe(u8, image_url);
+                                                    },
+                                                    .text_with_photo => |*text_photo| {
+                                                        if (text_photo.photo.url) |old_url| {
+                                                            self.allocator.free(old_url);
+                                                        }
+                                                        text_photo.photo.url = try self.allocator.dupe(u8, image_url);
+                                                    },
+                                                    .text => unreachable,
+                                                }
+                                                
+                                                // Send the message now that the image is ready
+                                                if (self.message_handler) |handler| {
+                                                    if (self.message_handler_ctx) |ctx| {
+                                                        handler(ctx, pending_msg.chat_id, pending_msg.user_info, pending_msg.content);
+                                                    }
+                                                }
+                                                
+                                                // Remove from pending messages
+                                                if (self.pending_images.fetchRemove(file_id)) |entry| {
+                                                    var mutable_entry = entry;
+                                                    mutable_entry.value.deinit(self.allocator);
+                                                }
+                                                
+                                                if (self.config.debug_mode) {
+                                                    print("[Telegram] ✅ Sent pending image message to Discord\n", .{});
+                                                }
+                                            } else {
+                                                if (self.config.debug_mode) {
+                                                    print("[Telegram] ⚠️  No pending message found for file_id {d}\n", .{file_id});
+                                                }
+                                            }
+                                        } else {
+                                            print("[Telegram] ❌ No path found in downloaded image file\n", .{});
+                                        }
+                                    } else {
+                                        print("[Telegram] ⏳ Image download still in progress for file {d}\n", .{file_id});
+                                    }
+                                } else {
+                                    print("[Telegram] ❌ No download completion status found for image\n", .{});
+                                }
+                            } else {
+                                print("[Telegram] ❌ No local file info found for image\n", .{});
+                            }
+                        }
+                    }
+                }
             } else {
                 if (self.config.debug_mode) {
-                    print("[Telegram] File download not related to avatar: {s}\n", .{extra_str});
+                    print("[Telegram] File download not related to avatar or image: {s}\n", .{extra_str});
                 }
             }
         } else {

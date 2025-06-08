@@ -15,8 +15,9 @@ A high-fidelity Telegram to Discord bridge written in Zig, designed to seamlessl
 - ✅ **Real-time Message Processing**: Instant message forwarding with minimal latency
 - ✅ **Telegram Authentication**: Complete Telegram authentication flow with TDLib
 - ✅ **Discord Bot Integration**: Basic Discord bot integration for message posting
+- ✅ **User Spoofing**: Discord webhook profiles for Telegram users with avatars
+- ✅ **Image Bridging**: Automatic download and forwarding of photos from Telegram to Discord
 - ❌ **Reply Threading**: Reply chain preservation not yet implemented
-- ❌ **User Spoofing**: Discord webhook profiles for Telegram users not yet implemented
 - ❌ **Reaction Mirroring**: Reaction sync not yet implemented
 
 ## Roadmap
@@ -28,13 +29,14 @@ A high-fidelity Telegram to Discord bridge written in Zig, designed to seamlessl
 - ✅ Basic Discord bot integration
 - ✅ Bridge architecture with threaded clients
 - ✅ Telegram to Discord message forwarding
-- 🚧 Discord webhook integration for user spoofing
+- ✅ Discord webhook integration for user spoofing
+- ✅ User avatar and name caching
+- ✅ Image/photo forwarding from Telegram to Discord
 - 🚧 Reply chain preservation and threading
 - 🚧 Bidirectional message forwarding (Discord to Telegram)
 - 🚧 Reaction synchronization
-- 🚧 User avatar and name caching
 - 🚧 Message editing sync
-- 🚧 File/media forwarding
+- 🚧 File/media forwarding (documents, videos, etc.)
 - 🚧 Full Discord WebSocket integration
 
 ## Prerequisites

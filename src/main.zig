@@ -101,7 +101,7 @@ const Bridge = struct {
         return result.toOwnedSlice();
     }
 
-    fn onTelegramMessage(ctx: *anyopaque, chat_id: i64, user_info: telegram.UserInfo, message_text: []const u8) void {
+    fn onTelegramMessage(ctx: *anyopaque, chat_id: i64, user_info: telegram.UserInfo, content: telegram.MessageContent) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         
         // Get user display name
@@ -110,10 +110,6 @@ const Bridge = struct {
             return;
         };
         defer self.allocator.free(display_name);
-        
-        print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s}\n", .{ 
-            chat_id, display_name, user_info.user_id, message_text 
-        });
         
         // Debug user info
         if (self.config.debug_mode) {
@@ -125,34 +121,107 @@ const Bridge = struct {
             print("[Bridge]   - avatar_url: {?s}\n", .{user_info.avatar_url});
         }
         
-        // Skip empty messages
-        if (message_text.len == 0) {
-            return;
+        switch (content) {
+            .text => |message_text| {
+                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s}\n", .{ 
+                    chat_id, display_name, user_info.user_id, message_text 
+                });
+                
+                // Skip empty messages
+                if (message_text.len == 0) {
+                    return;
+                }
+                
+                // Escape Discord markdown characters in the message
+                const escaped_message = self.escapeDiscordMarkdown(message_text) catch message_text;
+                defer if (escaped_message.ptr != message_text.ptr) self.allocator.free(escaped_message);
+                
+                // Use webhook spoofing for text messages
+                if (self.config.debug_mode) {
+                    print("[Bridge] Using webhook spoofing for text message from user: {s}\n", .{display_name});
+                }
+                
+                self.webhook_executor.sendSpoofedMessage(
+                    escaped_message,
+                    display_name,
+                    user_info.avatar_url
+                ) catch |err| {
+                    print("[Bridge] Webhook failed: {}, falling back to regular message\n", .{err});
+                    // Fallback to regular Discord API
+                    self.sendRegularDiscordMessage(escaped_message, display_name);
+                };
+            },
+            .photo => |image_info| {
+                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): [Photo {d}x{d}]\n", .{ 
+                    chat_id, display_name, user_info.user_id, image_info.width, image_info.height 
+                });
+                
+                if (image_info.url) |image_url| {
+                    // Image is ready, send it to Discord
+                    if (self.config.debug_mode) {
+                        print("[Bridge] 📸 Sending image to Discord: {s}\n", .{image_url});
+                    }
+                    
+                    self.webhook_executor.sendSpoofedMessageWithImage(
+                        null, // No caption
+                        display_name,
+                        user_info.avatar_url,
+                        image_url
+                    ) catch |err| {
+                        print("[Bridge] Image webhook failed: {}, falling back to text message\n", .{err});
+                        const fallback_message = std.fmt.allocPrint(
+                            self.allocator,
+                            "[Image: {d}x{d}] - {s}",
+                            .{ image_info.width, image_info.height, image_url }
+                        ) catch "[Image]";
+                        defer if (fallback_message.ptr != "[Image]".ptr) self.allocator.free(fallback_message);
+                        
+                        self.sendRegularDiscordMessage(fallback_message, display_name);
+                    };
+                } else {
+                    // Image is still downloading, wait for it to be ready
+                    print("[Bridge] ⏳ Image still downloading, will send when ready\n", .{});
+                    // TODO: Store pending image message and send when download completes
+                }
+            },
+            .text_with_photo => |text_photo| {
+                print("[Bridge] Telegram -> Discord: Chat {d}, User {s} ({d}): {s} [Photo {d}x{d}]\n", .{ 
+                    chat_id, display_name, user_info.user_id, text_photo.text, text_photo.photo.width, text_photo.photo.height 
+                });
+                
+                // Escape Discord markdown characters in the caption
+                const escaped_caption = self.escapeDiscordMarkdown(text_photo.text) catch text_photo.text;
+                defer if (escaped_caption.ptr != text_photo.text.ptr) self.allocator.free(escaped_caption);
+                
+                if (text_photo.photo.url) |image_url| {
+                    // Image is ready, send it to Discord with caption
+                    if (self.config.debug_mode) {
+                        print("[Bridge] 📸 Sending image with caption to Discord: {s}\n", .{image_url});
+                    }
+                    
+                    self.webhook_executor.sendSpoofedMessageWithImage(
+                        escaped_caption,
+                        display_name,
+                        user_info.avatar_url,
+                        image_url
+                    ) catch |err| {
+                        print("[Bridge] Image with caption webhook failed: {}, falling back to text message\n", .{err});
+                        const fallback_message = std.fmt.allocPrint(
+                            self.allocator,
+                            "{s}\n[Image: {d}x{d}] - {s}",
+                            .{ escaped_caption, text_photo.photo.width, text_photo.photo.height, image_url }
+                        ) catch escaped_caption;
+                        defer if (fallback_message.ptr != escaped_caption.ptr) self.allocator.free(fallback_message);
+                        
+                        self.sendRegularDiscordMessage(fallback_message, display_name);
+                    };
+                } else {
+                    // Image is still downloading, wait for it to be ready
+                    print("[Bridge] ⏳ Image with caption still downloading, will send when ready\n", .{});
+                    // TODO: Store pending image message with caption and send when download completes
+                }
+            },
         }
-        
-        // Escape Discord markdown characters in the message
-        const escaped_message = self.escapeDiscordMarkdown(message_text) catch message_text;
-        defer if (escaped_message.ptr != message_text.ptr) self.allocator.free(escaped_message);
-        
-        // Use webhook spoofing (now always available)
-        if (self.config.debug_mode) {
-            print("[Bridge] Using webhook spoofing for user: {s}\n", .{display_name});
-            if (user_info.avatar_url) |avatar| {
-                print("[Bridge] Using avatar: {s}\n", .{avatar});
-            } else {
-                print("[Bridge] No avatar available for user {d}\n", .{user_info.user_id});
-            }
-        }
-        
-        self.webhook_executor.sendSpoofedMessage(
-            escaped_message,
-            display_name,
-            user_info.avatar_url
-        ) catch |err| {
-            print("[Bridge] Webhook failed: {}, falling back to regular message\n", .{err});
-            // Fallback to regular Discord API
-            self.sendRegularDiscordMessage(escaped_message, display_name);
-        };
     }
 
     fn sendRegularDiscordMessage(self: *Self, message_text: []const u8, sender_name: []const u8) void {

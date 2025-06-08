@@ -115,6 +115,23 @@ pub const WebhookExecutor = struct {
         
         try self.executeWebhook(payload);
     }
+    
+    pub fn sendSpoofedMessageWithImage(self: *Self, content: ?[]const u8, username: ?[]const u8, avatar_url: ?[]const u8, image_url: []const u8) !void {
+        // Create an embed with the image
+        const embed = Discord.Embed{
+            .image = .{ .url = image_url },
+            .description = content,
+        };
+        
+        const payload = WebhookExecutePayload{
+            .content = null, // Content goes in embed description
+            .username = username,
+            .avatar_url = avatar_url,
+            .embeds = @constCast(&[_]Discord.Embed{embed}),
+        };
+        
+        try self.executeWebhook(payload);
+    }
 };
 
 // Global state for the Discord client (needed for callbacks)
