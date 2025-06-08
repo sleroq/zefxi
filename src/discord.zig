@@ -181,7 +181,8 @@ pub const DiscordClient = struct {
         const client = global_client orelse return;
         
         // Skip messages from bots
-        // if (message.author.bot orelse false) return;
+        // TODO: Skip messages only from the bot itself
+        if (message.author.bot orelse false) return;
         
         if (message.channel_id != client.target_channel_id) return;
         
