@@ -1,3 +1,10 @@
 .zig-cache/
 zig-out/
+
 .env
+.envrc.local
+
+result
+result-*
+
+tdlib/
