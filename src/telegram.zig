@@ -154,8 +154,8 @@ pub const TelegramClient = struct {
         
         try self.send(request);
         
-        print("[Telegram] 📤 Requested profile photos for {d}\n", .{user_id});
         if (self.config.debug_mode) {
+            print("[Telegram] Requested profile photos for user {d}\n", .{user_id});
             print("[Telegram] Profile photos request: {s}\n", .{request});
         }
     }
@@ -533,13 +533,11 @@ pub const TelegramClient = struct {
                 }
             } else {
                 // Request user info and cache the message for later processing
+                if (self.config.debug_mode) {
+                    print("[Telegram] User info not cached for {d}, requesting info and avatar...\n", .{user_id});
+                }
                 try self.requestUserInfo(user_id);
                 try self.requestUserProfilePhotos(user_id);
-
-                
-                if (self.config.debug_mode) {
-                    print("[Telegram] User info not cached for {d}, requested info\n", .{user_id});
-                }
                 
                 // For now, create a minimal user info to allow message processing
                 const minimal_user = UserInfo{
@@ -882,11 +880,15 @@ pub const TelegramClient = struct {
     }
 
     fn handleFile(self: *Self, root: std.json.ObjectMap) !void {
-        print("[Telegram] 📁 Processing file download response\n", .{});
+        if (self.config.debug_mode) {
+            print("[Telegram] Processing file download response\n", .{});
+        }
         
         if (root.get("@extra")) |extra| {
             const extra_str = extra.string;
-            print("[Telegram] File extra: {s}\n", .{extra_str});
+            if (self.config.debug_mode) {
+                print("[Telegram] File extra: {s}\n", .{extra_str});
+            }
             
             // Check if this is an avatar download
             if (std.mem.startsWith(u8, extra_str, "avatar_")) {
@@ -899,7 +901,9 @@ pub const TelegramClient = struct {
                         return;
                     };
                     
-                    print("[Telegram] Processing avatar download for user {d}\n", .{user_id});
+                    if (self.config.debug_mode) {
+                        print("[Telegram] Processing avatar download for user {d}\n", .{user_id});
+                    }
                     
                     // Check if file was downloaded successfully
                     if (root.get("local")) |local| {
@@ -909,7 +913,9 @@ pub const TelegramClient = struct {
                             if (is_completed.bool) {
                                 if (local_obj.get("path")) |path| {
                                     const file_path = path.string;
-                                    print("[Telegram] ✅ Avatar downloaded successfully: {s}\n", .{file_path});
+                                    if (self.config.debug_mode) {
+                                        print("[Telegram] Avatar downloaded successfully: {s}\n", .{file_path});
+                                    }
                                     
                                     // Update user cache with local file path
                                     if (self.user_cache.getPtr(user_id)) |user_info| {
@@ -931,7 +937,10 @@ pub const TelegramClient = struct {
                                         // Set HTTP URL as avatar URL
                                         user_info.avatar_url = avatar_url;
                                         
-                                        print("[Telegram] 🖼️  Updated avatar for user {d}: {s}\n", .{ user_id, file_path });
+                                        if (self.config.debug_mode) {
+                                            print("[Telegram] Avatar URL set for user {d}: {s}\n", .{ user_id, avatar_url });
+                                            print("[Telegram] Local file path: {s}\n", .{file_path});
+                                        }
                                     } else {
                                         print("[Telegram] ⚠️  User {d} not found in cache when setting avatar\n", .{user_id});
                                     }

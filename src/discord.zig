@@ -98,6 +98,9 @@ pub const WebhookExecutor = struct {
             },
             else => {
                 print("[Webhook] Request failed with status: {}\n", .{fetch_result.status});
+                if (response_body.items.len > 0) {
+                    print("[Webhook] Error response: {s}\n", .{response_body.items});
+                }
                 return DiscordError.WebhookExecutionFailed;
             },
         }

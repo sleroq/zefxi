@@ -36,6 +36,9 @@ DISCORD_CHANNEL=your_channel_id
 # Required: Discord webhook URL for user spoofing
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN
 
+# Optional: Avatar server base URL (defaults to localhost)
+AVATAR_BASE_URL=https://bore.cum.army
+
 # Optional: Enable debug mode
 DEBUG=true
 ```

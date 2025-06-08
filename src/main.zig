@@ -138,9 +138,9 @@ const Bridge = struct {
         if (self.config.debug_mode) {
             print("[Bridge] Using webhook spoofing for user: {s}\n", .{display_name});
             if (user_info.avatar_url) |avatar| {
-                print("[Bridge] 🖼️  Using avatar: {s}\n", .{avatar});
+                print("[Bridge] Using avatar: {s}\n", .{avatar});
             } else {
-                print("[Bridge] ❌ No avatar available for user {d}\n", .{user_info.user_id});
+                print("[Bridge] No avatar available for user {d}\n", .{user_info.user_id});
             }
         }
         
