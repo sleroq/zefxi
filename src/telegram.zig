@@ -37,7 +37,26 @@ pub const TelegramError = error{
     AllocationError,
 };
 
-pub const MessageHandler = *const fn (ctx: *anyopaque, chat_id: i64, user_id: i64, message_text: []const u8) void;
+// Structure to hold user information for Discord spoofing
+pub const UserInfo = struct {
+    user_id: i64,
+    first_name: []const u8,
+    last_name: ?[]const u8,
+    username: ?[]const u8,
+    avatar_url: ?[]const u8,
+    
+    pub fn getDisplayName(self: UserInfo, allocator: Allocator) ![]u8 {
+        if (self.username) |uname| {
+            return std.fmt.allocPrint(allocator, "@{s}", .{uname});
+        } else if (self.last_name) |lname| {
+            return std.fmt.allocPrint(allocator, "{s} {s}", .{ self.first_name, lname });
+        } else {
+            return std.fmt.allocPrint(allocator, "{s}", .{self.first_name});
+        }
+    }
+};
+
+pub const MessageHandler = *const fn (ctx: *anyopaque, chat_id: i64, user_info: UserInfo, message_text: []const u8) void;
 
 pub const TelegramClient = struct {
     allocator: Allocator,
@@ -52,6 +71,8 @@ pub const TelegramClient = struct {
     message_handler: ?MessageHandler,
     message_handler_ctx: ?*anyopaque,
     my_user_id: ?i64,
+    user_cache: std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage),
+    pending_requests: std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
     
     const Self = @This();
 
@@ -69,6 +90,8 @@ pub const TelegramClient = struct {
             .message_handler = null,
             .message_handler_ctx = null,
             .my_user_id = null,
+            .user_cache = std.HashMap(i64, UserInfo, std.hash_map.AutoContext(i64), std.hash_map.default_max_load_percentage).init(allocator),
+            .pending_requests = std.HashMap([]const u8, i64, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
         };
     }
 
@@ -78,11 +101,60 @@ pub const TelegramClient = struct {
             self.send("{\"@type\":\"close\"}") catch {};
         }
         self.send_buffer.deinit();
+        
+        // Clean up user cache
+        var iterator = self.user_cache.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.value_ptr.first_name);
+            if (entry.value_ptr.last_name) |lname| {
+                self.allocator.free(lname);
+            }
+            if (entry.value_ptr.username) |uname| {
+                self.allocator.free(uname);
+            }
+            if (entry.value_ptr.avatar_url) |avatar| {
+                self.allocator.free(avatar);
+            }
+        }
+        self.user_cache.deinit();
+        
+        // Clean up pending requests
+        var req_iterator = self.pending_requests.iterator();
+        while (req_iterator.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.pending_requests.deinit();
     }
 
     pub fn setMessageHandler(self: *Self, ctx: *anyopaque, handler: MessageHandler) void {
         self.message_handler = handler;
         self.message_handler_ctx = ctx;
+    }
+
+    pub fn getUserInfo(self: *Self, user_id: i64) ?UserInfo {
+        return self.user_cache.get(user_id);
+    }
+
+    pub fn requestUserInfo(self: *Self, user_id: i64) !void {
+        const request = try std.fmt.allocPrint(self.allocator, "{{\"@type\":\"getUser\",\"user_id\":{d},\"@extra\":\"user_{d}\"}}", .{ user_id, user_id });
+        defer self.allocator.free(request);
+        
+        try self.send(request);
+        
+        if (self.config.debug_mode) {
+            print("[Telegram] Requested user info for {d}\n", .{user_id});
+        }
+    }
+
+    pub fn requestUserProfilePhotos(self: *Self, user_id: i64) !void {
+        const request = try std.fmt.allocPrint(self.allocator, "{{\"@type\":\"getUserProfilePhotos\",\"user_id\":{d},\"offset\":0,\"limit\":1,\"@extra\":\"photos_{d}\"}}", .{ user_id, user_id });
+        defer self.allocator.free(request);
+        
+        try self.send(request);
+        
+        if (self.config.debug_mode) {
+            print("[Telegram] Requested profile photos for {d}\n", .{user_id});
+        }
     }
 
     pub fn start(self: *Self) !void {
@@ -304,6 +376,10 @@ pub const TelegramClient = struct {
             try self.handleChats(root);
         } else if (std.mem.eql(u8, update_type, "user")) {
             try self.handleUser(root);
+        } else if (std.mem.eql(u8, update_type, "userProfilePhotos")) {
+            try self.handleUserProfilePhotos(root);
+        } else if (std.mem.eql(u8, update_type, "file")) {
+            try self.handleFile(root);
         } else if (std.mem.eql(u8, update_type, "error")) {
             try self.handleError(root);
         }
@@ -421,11 +497,40 @@ pub const TelegramClient = struct {
             
             print("[Telegram] NEW MESSAGE: Chat {d}, User {d}: {s}\n", .{ message_chat_id, user_id, message_text });
             
-            // Call the message handler if set
-            if (self.message_handler) |handler| {
-                if (self.message_handler_ctx) |ctx| {
-                    handler(ctx, message_chat_id, user_id, message_text);
+            // Get or request user info
+            if (self.getUserInfo(user_id)) |user_info| {
+                // We have user info, call the handler
+                if (self.message_handler) |handler| {
+                    if (self.message_handler_ctx) |ctx| {
+                        handler(ctx, message_chat_id, user_info, message_text);
+                    }
                 }
+            } else {
+                // Request user info and cache the message for later processing
+                try self.requestUserInfo(user_id);
+                try self.requestUserProfilePhotos(user_id);
+                
+                if (self.config.debug_mode) {
+                    print("[Telegram] User info not cached for {d}, requested info\n", .{user_id});
+                }
+                
+                // For now, create a minimal user info to allow message processing
+                const minimal_user = UserInfo{
+                    .user_id = user_id,
+                    .first_name = try std.fmt.allocPrint(self.allocator, "User{d}", .{user_id}),
+                    .last_name = null,
+                    .username = null,
+                    .avatar_url = null,
+                };
+                
+                if (self.message_handler) |handler| {
+                    if (self.message_handler_ctx) |ctx| {
+                        handler(ctx, message_chat_id, minimal_user, message_text);
+                    }
+                }
+                
+                // Clean up the minimal user info
+                self.allocator.free(minimal_user.first_name);
             }
         }
     }
@@ -480,21 +585,124 @@ pub const TelegramClient = struct {
     }
 
     fn handleUser(self: *Self, root: std.json.ObjectMap) !void {
-        // Store the current user's ID
         if (root.get("id")) |id| {
-            self.my_user_id = id.integer;
+            const user_id = id.integer;
+            
+            // Check if this is for ourselves
+            if (self.my_user_id == null) {
+                self.my_user_id = user_id;
+                if (self.config.debug_mode) {
+                    print("[Telegram] My user ID: {d}\n", .{user_id});
+                }
+            }
+            
+            // Extract user information
+            var first_name: []const u8 = "";
+            var last_name: ?[]const u8 = null;
+            var username: ?[]const u8 = null;
+            
+            if (root.get("first_name")) |fname| {
+                first_name = fname.string;
+            }
+            
+            if (root.get("last_name")) |lname| {
+                if (lname != .null) {
+                    last_name = lname.string;
+                }
+            }
+            
+            if (root.get("usernames")) |usernames| {
+                const usernames_obj = usernames.object;
+                if (usernames_obj.get("editable_username")) |editable_username| {
+                    if (editable_username != .null) {
+                        username = editable_username.string;
+                    }
+                }
+            } else if (root.get("username")) |uname| {
+                if (uname != .null) {
+                    username = uname.string;
+                }
+            }
+            
+            // Store user info in cache
+            const user_info = UserInfo{
+                .user_id = user_id,
+                .first_name = try self.allocator.dupe(u8, first_name),
+                .last_name = if (last_name) |lname| try self.allocator.dupe(u8, lname) else null,
+                .username = if (username) |uname| try self.allocator.dupe(u8, uname) else null,
+                .avatar_url = null, // Will be set when we get profile photos
+            };
+            
+            try self.user_cache.put(user_id, user_info);
+            
             if (self.config.debug_mode) {
-                print("[Telegram] My user ID: {d}\n", .{self.my_user_id.?});
+                print("[Telegram] Cached user info for {d}: {s}\n", .{ user_id, first_name });
+            }
+            
+            if (user_id == self.my_user_id) {
+                if (username) |uname| {
+                    print("[Telegram] Logged in as: {s} (@{s})\n", .{ first_name, uname });
+                } else {
+                    print("[Telegram] Logged in as: {s}\n", .{first_name});
+                }
             }
         }
-        
-        if (root.get("first_name")) |first_name| {
-            if (root.get("username")) |username| {
-                print("[Telegram] Logged in as: {s} (@{s})\n", .{ first_name.string, username.string });
-            } else {
-                print("[Telegram] Logged in as: {s}\n", .{first_name.string});
+    }
+
+    fn handleUserProfilePhotos(self: *Self, root: std.json.ObjectMap) !void {
+        if (root.get("@extra")) |extra| {
+            const extra_str = extra.string;
+            if (std.mem.startsWith(u8, extra_str, "photos_")) {
+                const user_id_str = extra_str[7..];
+                const user_id = std.fmt.parseInt(i64, user_id_str, 10) catch return;
+                
+                if (root.get("photos")) |photos| {
+                    const photos_array = photos.array;
+                    if (photos_array.items.len > 0) {
+                        const first_photo = photos_array.items[0].object;
+                        if (first_photo.get("sizes")) |sizes| {
+                            const sizes_array = sizes.array;
+                            if (sizes_array.items.len > 0) {
+                                // Get the largest size
+                                const largest_size = sizes_array.items[sizes_array.items.len - 1].object;
+                                if (largest_size.get("photo")) |photo| {
+                                    const photo_obj = photo.object;
+                                    if (photo_obj.get("remote")) |remote| {
+                                        const remote_obj = remote.object;
+                                        if (remote_obj.get("unique_id")) |unique_id| {
+                                            // Generate a Telegram avatar URL
+                                            const avatar_url = try std.fmt.allocPrint(
+                                                self.allocator,
+                                                "https://t.me/i/userpic/320/{s}.jpg",
+                                                .{unique_id.string}
+                                            );
+                                            
+                                            // Update user cache with avatar URL
+                                            if (self.user_cache.getPtr(user_id)) |user_info| {
+                                                if (user_info.avatar_url) |old_url| {
+                                                    self.allocator.free(old_url);
+                                                }
+                                                user_info.avatar_url = avatar_url;
+                                                
+                                                if (self.config.debug_mode) {
+                                                    print("[Telegram] Set avatar URL for user {d}: {s}\n", .{ user_id, avatar_url });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+
+    fn handleFile(self: *Self, root: std.json.ObjectMap) !void {
+        // This can be used to handle downloaded profile photos if needed
+        _ = self;
+        _ = root;
     }
 
     fn handleError(self: *Self, root: std.json.ObjectMap) !void {

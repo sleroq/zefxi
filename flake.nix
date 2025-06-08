@@ -34,9 +34,11 @@
             echo "Environment variables needed:"
             echo "  TELEGRAM_API_ID       - Your Telegram API ID"
             echo "  TELEGRAM_API_HASH     - Your Telegram API Hash"
+            echo "  TELEGRAM_CHAT_ID      - Your Telegram chat ID"
             echo "  DISCORD_TOKEN         - Your Discord bot token"
             echo "  DISCORD_SERVER        - Your Discord server ID"
             echo "  DISCORD_CHANNEL       - Your Discord channel ID"
+            echo "  DISCORD_WEBHOOK_URL   - Your Discord webhook URL (required for user spoofing)"
             echo ""
           '';
         };
