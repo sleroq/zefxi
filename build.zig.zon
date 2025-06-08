@@ -3,17 +3,18 @@
     .fingerprint = 0xe66a95d272a0b8ec,
     .version = "0.1.0",
     .minimum_zig_version = "0.14.0",
-    
+
     .dependencies = .{
         .discordzig = .{
-            .path = "discord.zig",
+            .url = "https://git.yuzucchii.xyz/yuzucchii/discord.zig/archive/master.tar.gz",
+            .hash = "discordzig-1.0.0-KYtlUwJiCAAEIPpIhalsKsLJiKEyy3mB2d5UGY4RB69n",
         },
     },
-    
+
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
         "README.md",
     },
-} 
+}

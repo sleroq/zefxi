@@ -37,7 +37,7 @@ pub const TelegramError = error{
     AllocationError,
 };
 
-pub const MessageHandler = *const fn (chat_id: i64, user_id: i64, message_text: []const u8) void;
+pub const MessageHandler = *const fn (ctx: *anyopaque, chat_id: i64, user_id: i64, message_text: []const u8) void;
 
 pub const TelegramClient = struct {
     allocator: Allocator,
@@ -50,6 +50,8 @@ pub const TelegramClient = struct {
     config: Config,
     send_buffer: std.ArrayList(u8),
     message_handler: ?MessageHandler,
+    message_handler_ctx: ?*anyopaque,
+    my_user_id: ?i64,
     
     const Self = @This();
 
@@ -65,6 +67,8 @@ pub const TelegramClient = struct {
             .config = config,
             .send_buffer = std.ArrayList(u8).init(allocator),
             .message_handler = null,
+            .message_handler_ctx = null,
+            .my_user_id = null,
         };
     }
 
@@ -76,8 +80,9 @@ pub const TelegramClient = struct {
         self.send_buffer.deinit();
     }
 
-    pub fn setMessageHandler(self: *Self, handler: MessageHandler) void {
+    pub fn setMessageHandler(self: *Self, ctx: *anyopaque, handler: MessageHandler) void {
         self.message_handler = handler;
+        self.message_handler_ctx = ctx;
     }
 
     pub fn start(self: *Self) !void {
@@ -363,6 +368,16 @@ pub const TelegramClient = struct {
         if (root.get("message")) |message| {
             const msg_obj = message.object;
             
+            // Log the full message JSON if debug mode is enabled
+            if (self.config.debug_mode) {
+                const message_json = std.json.stringifyAlloc(self.allocator, message, .{}) catch |err| {
+                    print("[Telegram] Failed to stringify message JSON: {}\n", .{err});
+                    return;
+                };
+                defer self.allocator.free(message_json);
+                print("[Telegram] Message JSON: {s}\n", .{message_json});
+            }
+            
             var message_chat_id: i64 = 0;
             if (msg_obj.get("chat_id")) |chat_id| {
                 message_chat_id = chat_id.integer;
@@ -374,12 +389,22 @@ pub const TelegramClient = struct {
                     return;
                 }
             }
-            
+
             var user_id: i64 = 0;
             if (msg_obj.get("sender_id")) |sender_id| {
                 const sender_obj = sender_id.object;
                 if (sender_obj.get("user_id")) |uid| {
                     user_id = uid.integer;
+                }
+            }
+            
+            // Ignore messages from myself
+            if (self.my_user_id) |my_id| {
+                if (user_id == my_id) {
+                    if (self.config.debug_mode) {
+                        print("[Telegram] Ignoring message from myself (user {d})\n", .{my_id});
+                    }
+                    return;
                 }
             }
             
@@ -398,7 +423,9 @@ pub const TelegramClient = struct {
             
             // Call the message handler if set
             if (self.message_handler) |handler| {
-                handler(message_chat_id, user_id, message_text);
+                if (self.message_handler_ctx) |ctx| {
+                    handler(ctx, message_chat_id, user_id, message_text);
+                }
             }
         }
     }
@@ -453,7 +480,14 @@ pub const TelegramClient = struct {
     }
 
     fn handleUser(self: *Self, root: std.json.ObjectMap) !void {
-        _ = self;
+        // Store the current user's ID
+        if (root.get("id")) |id| {
+            self.my_user_id = id.integer;
+            if (self.config.debug_mode) {
+                print("[Telegram] My user ID: {d}\n", .{self.my_user_id.?});
+            }
+        }
+        
         if (root.get("first_name")) |first_name| {
             if (root.get("username")) |username| {
                 print("[Telegram] Logged in as: {s} (@{s})\n", .{ first_name.string, username.string });
@@ -484,6 +518,21 @@ pub const TelegramClient = struct {
         const trimmed = std.mem.trim(u8, input, " \t\r\n");
         defer self.allocator.free(input);
         return try self.allocator.dupe(u8, trimmed);
+    }
+
+    pub fn sendMessage(self: *Self, chat_id: i64, text: []const u8) !void {
+        // Build the JSON request manually to avoid complex nested struct issues
+        const request = try std.fmt.allocPrint(self.allocator,
+            "{{\"@type\":\"sendMessage\",\"chat_id\":{d},\"input_message_content\":{{\"@type\":\"inputMessageText\",\"text\":{{\"@type\":\"formattedText\",\"text\":\"{s}\"}}}}}}",
+            .{ chat_id, text }
+        );
+        defer self.allocator.free(request);
+        
+        try self.send(request);
+        
+        if (self.config.debug_mode) {
+            print("[Telegram] Sent message to chat {d}: {s}\n", .{ chat_id, text });
+        }
     }
 
     pub fn tick(self: *Self) !bool {
