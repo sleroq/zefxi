@@ -15,6 +15,28 @@ extern "c" fn td_json_client_receive(client: *anyopaque, timeout: f64) ?[*:0]con
 extern "c" fn td_json_client_execute(client: ?*anyopaque, request: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn td_json_client_destroy(client: *anyopaque) void;
 
+const Config = struct {
+    database_directory: []const u8 = "tdlib",
+    files_directory: []const u8 = "tdlib",
+    system_language_code: []const u8 = "en",
+    device_model: []const u8 = "Desktop",
+    system_version: []const u8 = "Linux",
+    application_version: []const u8 = "1.0",
+    log_verbosity: i32 = 2,
+    receive_timeout: f64 = 1.0,
+    use_test_dc: bool = false,
+    enable_storage_optimizer: bool = true,
+    debug_mode: bool = false,
+};
+
+const TelegramError = error{
+    ClientNotInitialized,
+    ClientClosed,
+    InvalidState,
+    JsonParseError,
+    AllocationError,
+};
+
 const TelegramClient = struct {
     allocator: Allocator,
     api_id: i32,
@@ -23,10 +45,12 @@ const TelegramClient = struct {
     is_authorized: bool,
     is_closed: bool,
     target_chat_id: ?i64,
+    config: Config,
+    send_buffer: std.ArrayList(u8),
     
     const Self = @This();
 
-    pub fn init(allocator: Allocator, api_id: i32, api_hash: []const u8, target_chat_id: ?i64) Self {
+    pub fn init(allocator: Allocator, api_id: i32, api_hash: []const u8, target_chat_id: ?i64, config: Config) !Self {
         return Self{
             .allocator = allocator,
             .api_id = api_id,
@@ -35,157 +59,209 @@ const TelegramClient = struct {
             .is_authorized = false,
             .is_closed = false,
             .target_chat_id = target_chat_id,
+            .config = config,
+            .send_buffer = std.ArrayList(u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        _ = self;
-        // TDLib client instances are destroyed automatically after they are closed
+        if (!self.is_closed) {
+            // Try to close gracefully
+            self.send("{\"@type\":\"close\"}") catch {};
+        }
+        self.send_buffer.deinit();
     }
 
     pub fn start(self: *Self) !void {
         // Set log verbosity level
-        const log_request = "{\"@type\":\"setLogVerbosityLevel\",\"new_verbosity_level\":2}";
+        const log_request = try std.fmt.allocPrintZ(self.allocator, "{{\"@type\":\"setLogVerbosityLevel\",\"new_verbosity_level\":{d}}}", .{self.config.log_verbosity});
+        defer self.allocator.free(log_request);
+        
         _ = td_execute(log_request.ptr);
         
-        // Create client
         self.client_id = td_create_client_id();
-        print("Created TDLib client with ID: {d}\n", .{self.client_id});
+        if (self.client_id == 0) {
+            return TelegramError.ClientNotInitialized;
+        }
         
-        // Test execute method
-        print("\nTesting TDLib execute method...\n", .{});
-        const test_request = "{\"@type\":\"getTextEntities\",\"text\":\"@telegram /test_command https://telegram.org telegram.me\"}";
-        if (td_execute(test_request.ptr)) |result| {
-            const result_str = std.mem.span(result);
-            print("Text entities result: {s}\n", .{result_str});
+        if (self.config.debug_mode) {
+            print("Created TDLib client with ID: {d}\n", .{self.client_id});
+        }
+        
+        if (self.config.debug_mode) {
+            print("\nTesting TDLib execute method...\n", .{});
+            const test_request = "{\"@type\":\"getTextEntities\",\"text\":\"@telegram /test_command https://telegram.org telegram.me\"}";
+            if (td_execute(test_request.ptr)) |result| {
+                const result_str = std.mem.span(result);
+                print("Text entities result: {s}\n", .{result_str});
+            }
         }
         
         // Get TDLib version
         const version_request = "{\"@type\":\"getOption\",\"name\":\"version\"}";
-        self.send(version_request);
+        try self.send(version_request);
     }
 
-    pub fn send(self: *Self, request: []const u8) void {
-        // Create null-terminated string
-        const request_cstr = self.allocator.dupeZ(u8, request) catch {
-            print("Failed to allocate memory for request\n", .{});
-            return;
-        };
-        defer self.allocator.free(request_cstr);
+    pub fn send(self: *Self, request: []const u8) !void {
+        if (self.is_closed) {
+            return TelegramError.ClientClosed;
+        }
+        if (self.client_id == 0) {
+            return TelegramError.ClientNotInitialized;
+        }
         
-        td_send(self.client_id, request_cstr.ptr);
-        print("Sent request: {s}\n", .{request});
+        self.send_buffer.clearRetainingCapacity();
+        try self.send_buffer.appendSlice(request);
+        try self.send_buffer.append(0); // null terminator
+        
+        const null_terminated_ptr: [*:0]const u8 = @ptrCast(self.send_buffer.items.ptr);
+        td_send(self.client_id, null_terminated_ptr);
+        
+        if (self.config.debug_mode) {
+            print("Sent request: {s}\n", .{request});
+        }
     }
 
     pub fn receive(self: *Self, timeout: f64) ?[]const u8 {
-        _ = self; // Suppress unused parameter warning
+        if (self.is_closed) return null;
+        
         if (td_receive(timeout)) |result| {
             return std.mem.span(result);
         }
         return null;
     }
 
-    pub fn setTdlibParameters(self: *Self) void {
+    fn buildJsonRequest(self: *Self, request_type: []const u8, params: anytype) ![]u8 {
         var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-        
         const writer = buffer.writer();
         
-        // Build setTdlibParameters request
-        writer.print(
-            "{{\"@type\":\"setTdlibParameters\"," ++
-            "\"use_test_dc\":false," ++
-            "\"database_directory\":\"tdlib\"," ++
-            "\"files_directory\":\"tdlib\"," ++
-            "\"database_encryption_key\":\"\"," ++
-            "\"use_file_database\":true," ++
-            "\"use_chat_info_database\":true," ++
-            "\"use_message_database\":true," ++
-            "\"use_secret_chats\":true," ++
-            "\"api_id\":{d}," ++
-            "\"api_hash\":\"{s}\"," ++
-            "\"system_language_code\":\"en\"," ++
-            "\"device_model\":\"Desktop\"," ++
-            "\"system_version\":\"Linux\"," ++
-            "\"application_version\":\"1.0\"," ++
-            "\"enable_storage_optimizer\":true," ++
-            "\"ignore_file_names\":false}}", 
-            .{ self.api_id, self.api_hash }
-        ) catch return;
+        try writer.print("{{\"@type\":\"{s}\"", .{request_type});
         
-        self.send(buffer.items);
+        // Add parameters dynamically based on the struct fields
+        inline for (std.meta.fields(@TypeOf(params))) |field| {
+            try writer.print(",\"{s}\":", .{field.name});
+            const value = @field(params, field.name);
+            switch (@TypeOf(value)) {
+                []const u8 => try writer.print("\"{s}\"", .{value}),
+                i32, i64 => try writer.print("{d}", .{value}),
+                bool => try writer.print("{}", .{value}),
+                else => @compileError("Unsupported parameter type: " ++ @typeName(@TypeOf(value))),
+            }
+        }
+        
+        try writer.writeByte('}');
+        return buffer.toOwnedSlice();
     }
 
-    pub fn setAuthenticationPhoneNumber(self: *Self, phone_number: []const u8) void {
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+    pub fn setTdlibParameters(self: *Self) !void {
+        const params = struct {
+            use_test_dc: bool,
+            database_directory: []const u8,
+            files_directory: []const u8,
+            database_encryption_key: []const u8,
+            use_file_database: bool,
+            use_chat_info_database: bool,
+            use_message_database: bool,
+            use_secret_chats: bool,
+            api_id: i32,
+            api_hash: []const u8,
+            system_language_code: []const u8,
+            device_model: []const u8,
+            system_version: []const u8,
+            application_version: []const u8,
+            enable_storage_optimizer: bool,
+            ignore_file_names: bool,
+        }{
+            .use_test_dc = self.config.use_test_dc,
+            .database_directory = self.config.database_directory,
+            .files_directory = self.config.files_directory,
+            .database_encryption_key = "",
+            .use_file_database = true,
+            .use_chat_info_database = true,
+            .use_message_database = true,
+            .use_secret_chats = true,
+            .api_id = self.api_id,
+            .api_hash = self.api_hash,
+            .system_language_code = self.config.system_language_code,
+            .device_model = self.config.device_model,
+            .system_version = self.config.system_version,
+            .application_version = self.config.application_version,
+            .enable_storage_optimizer = self.config.enable_storage_optimizer,
+            .ignore_file_names = false,
+        };
         
-        const writer = buffer.writer();
-        writer.print(
-            "{{\"@type\":\"setAuthenticationPhoneNumber\",\"phone_number\":\"{s}\"}}", 
-            .{phone_number}
-        ) catch return;
+        const request = try self.buildJsonRequest("setTdlibParameters", params);
+        defer self.allocator.free(request);
         
-        self.send(buffer.items);
+        try self.send(request);
     }
 
-    pub fn checkAuthenticationCode(self: *Self, code: []const u8) void {
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+    pub fn setAuthenticationPhoneNumber(self: *Self, phone_number: []const u8) !void {
+        const params = struct {
+            phone_number: []const u8,
+        }{ .phone_number = phone_number };
         
-        const writer = buffer.writer();
-        writer.print(
-            "{{\"@type\":\"checkAuthenticationCode\",\"code\":\"{s}\"}}", 
-            .{code}
-        ) catch return;
+        const request = try self.buildJsonRequest("setAuthenticationPhoneNumber", params);
+        defer self.allocator.free(request);
         
-        self.send(buffer.items);
+        try self.send(request);
     }
 
-    pub fn checkAuthenticationPassword(self: *Self, password: []const u8) void {
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+    pub fn checkAuthenticationCode(self: *Self, code: []const u8) !void {
+        const params = struct {
+            code: []const u8,
+        }{ .code = code };
         
-        const writer = buffer.writer();
-        writer.print(
-            "{{\"@type\":\"checkAuthenticationPassword\",\"password\":\"{s}\"}}", 
-            .{password}
-        ) catch return;
+        const request = try self.buildJsonRequest("checkAuthenticationCode", params);
+        defer self.allocator.free(request);
         
-        self.send(buffer.items);
+        try self.send(request);
     }
 
-    pub fn registerUser(self: *Self, first_name: []const u8, last_name: []const u8) void {
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+    pub fn checkAuthenticationPassword(self: *Self, password: []const u8) !void {
+        const params = struct {
+            password: []const u8,
+        }{ .password = password };
         
-        const writer = buffer.writer();
-        writer.print(
-            "{{\"@type\":\"registerUser\",\"first_name\":\"{s}\",\"last_name\":\"{s}\"}}", 
-            .{ first_name, last_name }
-        ) catch return;
+        const request = try self.buildJsonRequest("checkAuthenticationPassword", params);
+        defer self.allocator.free(request);
         
-        self.send(buffer.items);
+        try self.send(request);
     }
 
-    pub fn openSpecificChat(self: *Self, chat_id: i64) void {
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+    pub fn registerUser(self: *Self, first_name: []const u8, last_name: []const u8) !void {
+        const params = struct {
+            first_name: []const u8,
+            last_name: []const u8,
+        }{ .first_name = first_name, .last_name = last_name };
         
-        const writer = buffer.writer();
-        writer.print("{{\"@type\":\"openChat\",\"chat_id\":{d}}}", .{chat_id}) catch return;
+        const request = try self.buildJsonRequest("registerUser", params);
+        defer self.allocator.free(request);
         
-        self.send(buffer.items);
-        print("Opened chat {d} for monitoring\n", .{chat_id});
+        try self.send(request);
+    }
+
+    pub fn openSpecificChat(self: *Self, chat_id: i64) !void {
+        const params = struct {
+            chat_id: i64,
+        }{ .chat_id = chat_id };
+        
+        const request = try self.buildJsonRequest("openChat", params);
+        defer self.allocator.free(request);
+        
+        try self.send(request);
+        
+        if (self.config.debug_mode) {
+            print("Opened chat {d} for monitoring\n", .{chat_id});
+        }
     }
 
     pub fn processUpdate(self: *Self, update_json: []const u8) !void {
-        // print("Received update: {s}\n", .{update_json});
-        
-        // Parse JSON to determine update type
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, update_json, .{}) catch |err| {
-            print("Failed to parse JSON: {}\n", .{err});
-            return;
+            if (self.config.debug_mode) {
+                print("Failed to parse JSON: {}\n", .{err});
+            }
+            return TelegramError.JsonParseError;
         };
         defer parsed.deinit();
         
@@ -195,33 +271,39 @@ const TelegramClient = struct {
             const update_type = type_value.string;
             
             // Only show very important updates to reduce noise
-            const show_update = std.mem.eql(u8, update_type, "updateAuthorizationState") or
+            const show_update = self.config.debug_mode and (
+                std.mem.eql(u8, update_type, "updateAuthorizationState") or
                 std.mem.eql(u8, update_type, "updateNewMessage") or
                 std.mem.eql(u8, update_type, "updateConnectionState") or
                 std.mem.eql(u8, update_type, "chats") or
                 std.mem.eql(u8, update_type, "user") or
-                std.mem.eql(u8, update_type, "error");
+                std.mem.eql(u8, update_type, "error"));
             
             if (show_update) {
                 print("Update type: {s}\n", .{update_type});
             }
             
-            if (std.mem.eql(u8, update_type, "updateAuthorizationState")) {
-                try self.handleAuthorizationState(root);
-            } else if (std.mem.eql(u8, update_type, "updateNewMessage")) {
-                try self.handleNewMessage(root);
-            } else if (std.mem.eql(u8, update_type, "updateConnectionState")) {
-                try self.handleConnectionState(root);
-            } else if (std.mem.eql(u8, update_type, "option")) {
-                try self.handleOption(root);
-            } else if (std.mem.eql(u8, update_type, "chats")) {
-                try self.handleChats(root);
-            } else if (std.mem.eql(u8, update_type, "user")) {
-                try self.handleUser(root);
-            } else if (std.mem.eql(u8, update_type, "error")) {
-                try self.handleError(root);
-            }
+            try self.dispatchUpdate(update_type, root);
         }
+    }
+
+    fn dispatchUpdate(self: *Self, update_type: []const u8, root: std.json.ObjectMap) !void {
+        if (std.mem.eql(u8, update_type, "updateAuthorizationState")) {
+            try self.handleAuthorizationState(root);
+        } else if (std.mem.eql(u8, update_type, "updateNewMessage")) {
+            try self.handleNewMessage(root);
+        } else if (std.mem.eql(u8, update_type, "updateConnectionState")) {
+            try self.handleConnectionState(root);
+        } else if (std.mem.eql(u8, update_type, "option")) {
+            try self.handleOption(root);
+        } else if (std.mem.eql(u8, update_type, "chats")) {
+            try self.handleChats(root);
+        } else if (std.mem.eql(u8, update_type, "user")) {
+            try self.handleUser(root);
+        } else if (std.mem.eql(u8, update_type, "error")) {
+            try self.handleError(root);
+        }
+        // Silently ignore unknown update types
     }
 
     fn handleAuthorizationState(self: *Self, root: std.json.ObjectMap) !void {
@@ -233,22 +315,22 @@ const TelegramClient = struct {
                 
                 if (std.mem.eql(u8, state_name, "authorizationStateWaitTdlibParameters")) {
                     print("Setting TDLib parameters...\n", .{});
-                    self.setTdlibParameters();
+                    try self.setTdlibParameters();
                 } else if (std.mem.eql(u8, state_name, "authorizationStateWaitPhoneNumber")) {
                     print("Please enter your phone number (with country code, e.g., +1234567890): ", .{});
                     const phone = try self.readInput();
                     defer self.allocator.free(phone);
-                    self.setAuthenticationPhoneNumber(phone);
+                    try self.setAuthenticationPhoneNumber(phone);
                 } else if (std.mem.eql(u8, state_name, "authorizationStateWaitCode")) {
                     print("Please enter the authentication code: ", .{});
                     const code = try self.readInput();
                     defer self.allocator.free(code);
-                    self.checkAuthenticationCode(code);
+                    try self.checkAuthenticationCode(code);
                 } else if (std.mem.eql(u8, state_name, "authorizationStateWaitPassword")) {
                     print("Please enter your 2FA password: ", .{});
                     const password = try self.readInput();
                     defer self.allocator.free(password);
-                    self.checkAuthenticationPassword(password);
+                    try self.checkAuthenticationPassword(password);
                 } else if (std.mem.eql(u8, state_name, "authorizationStateWaitRegistration")) {
                     print("Please enter your first name: ", .{});
                     const first_name = try self.readInput();
@@ -256,21 +338,19 @@ const TelegramClient = struct {
                     print("Please enter your last name: ", .{});
                     const last_name = try self.readInput();
                     defer self.allocator.free(last_name);
-                    self.registerUser(first_name, last_name);
+                    try self.registerUser(first_name, last_name);
                 } else if (std.mem.eql(u8, state_name, "authorizationStateReady")) {
                     print("Authorization successful!\n", .{});
                     self.is_authorized = true;
                     
-                    // Get current user info
-                    self.send("{\"@type\":\"getMe\"}");
+                    try self.send("{\"@type\":\"getMe\"}");
                     
                     if (self.target_chat_id) |chat_id| {
                         print("Monitoring specific chat: {d}\n", .{chat_id});
-                        self.openSpecificChat(chat_id);
+                        try self.openSpecificChat(chat_id);
                     } else {
                         print("Getting all chats...\n", .{});
-                        // Get chats to monitor for messages
-                        self.send("{\"@type\":\"getChats\",\"limit\":20}");
+                        try self.send("{\"@type\":\"getChats\",\"limit\":20}");
                     }
                 } else if (std.mem.eql(u8, state_name, "authorizationStateClosed")) {
                     print("TDLib client closed\n", .{});
@@ -284,7 +364,6 @@ const TelegramClient = struct {
         if (root.get("message")) |message| {
             const msg_obj = message.object;
             
-            // Get chat ID
             var message_chat_id: i64 = 0;
             if (msg_obj.get("chat_id")) |chat_id| {
                 message_chat_id = chat_id.integer;
@@ -293,14 +372,13 @@ const TelegramClient = struct {
             // If we're monitoring a specific chat, only show messages from that chat
             if (self.target_chat_id) |target_id| {
                 if (message_chat_id != target_id) {
-                    return; // Skip messages from other chats
+                    return;
                 }
             }
             
             print("NEW MESSAGE RECEIVED!\n", .{});
             print("  Chat ID: {d}\n", .{message_chat_id});
             
-            // Get sender info
             if (msg_obj.get("sender_id")) |sender_id| {
                 const sender_obj = sender_id.object;
                 if (sender_obj.get("user_id")) |user_id| {
@@ -308,7 +386,6 @@ const TelegramClient = struct {
                 }
             }
             
-            // Get message content
             if (msg_obj.get("content")) |content| {
                 const content_obj = content.object;
                 if (content_obj.get("@type")) |content_type| {
@@ -338,12 +415,13 @@ const TelegramClient = struct {
     }
 
     fn handleOption(self: *Self, root: std.json.ObjectMap) !void {
-        _ = self;
-        if (root.get("name")) |name| {
-            if (root.get("value")) |value| {
-                const value_obj = value.object;
-                if (value_obj.get("value")) |actual_value| {
-                    print("Option {s}: {s}\n", .{ name.string, actual_value.string });
+        if (self.config.debug_mode) {
+            if (root.get("name")) |name| {
+                if (root.get("value")) |value| {
+                    const value_obj = value.object;
+                    if (value_obj.get("value")) |actual_value| {
+                        print("Option {s}: {s}\n", .{ name.string, actual_value.string });
+                    }
                 }
             }
         }
@@ -359,14 +437,11 @@ const TelegramClient = struct {
                 const chat_id = chat_id_value.integer;
                 
                 // Open each chat to receive messages in real-time
-                var buffer = std.ArrayList(u8).init(self.allocator);
-                defer buffer.deinit();
+                try self.openSpecificChat(chat_id);
                 
-                const writer = buffer.writer();
-                writer.print("{{\"@type\":\"openChat\",\"chat_id\":{d}}}", .{chat_id}) catch continue;
-                
-                self.send(buffer.items);
-                print("Opened chat {d}\n", .{chat_id});
+                if (self.config.debug_mode) {
+                    print("Opened chat {d}\n", .{chat_id});
+                }
                 
                 // Small delay between opening chats
                 std.time.sleep(100 * std.time.ns_per_ms);
@@ -413,13 +488,11 @@ const TelegramClient = struct {
     }
 
     pub fn run(self: *Self) !void {
-        const timeout = 1.0; // 1 second timeout
-        
         print("\n=== Starting TDLib Event Loop ===\n", .{});
         print("Press Ctrl+C to exit\n\n", .{});
         
         while (!self.is_closed) {
-            if (self.receive(timeout)) |result| {
+            if (self.receive(self.config.receive_timeout)) |result| {
                 try self.processUpdate(result);
             }
             
@@ -473,6 +546,14 @@ pub fn main() !void {
         // Environment variable not set, monitor all chats
     }
 
+    var config = Config{};
+    if (std.process.getEnvVarOwned(allocator, "DEBUG")) |debug_str| {
+        defer allocator.free(debug_str);
+        config.debug_mode = std.mem.eql(u8, debug_str, "1") or std.mem.eql(u8, debug_str, "true");
+    } else |_| {
+        // Default to false
+    }
+
     print("Starting Zefxi - TDLib Telegram Client\n", .{});
     print("API ID: {d}\n", .{api_id});
     print("API Hash: {s}...\n", .{api_hash[0..@min(8, api_hash.len)]});
@@ -481,8 +562,12 @@ pub fn main() !void {
     } else {
         print("Monitoring: All chats\n", .{});
     }
+    print("Debug mode: {}\n", .{config.debug_mode});
 
-    var client = TelegramClient.init(allocator, api_id, api_hash, target_chat_id);
+    var client = TelegramClient.init(allocator, api_id, api_hash, target_chat_id, config) catch |err| {
+        print("Failed to initialize client: {}\n", .{err});
+        return;
+    };
     defer client.deinit();
 
     try client.start();
