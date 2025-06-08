@@ -3,14 +3,12 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const c = std.c;
 
-// TDLib C function declarations
 extern "c" fn td_create_client_id() c_int;
 extern "c" fn td_send(client_id: c_int, request: [*:0]const u8) void;
 extern "c" fn td_receive(timeout: f64) ?[*:0]const u8;
 extern "c" fn td_execute(request: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn td_set_log_message_callback(max_verbosity_level: c_int, callback: ?*const fn (c_int, [*:0]const u8) callconv(.C) void) void;
 
-// Alternative TDLib JSON client interface (newer)
 extern "c" fn td_json_client_create() ?*anyopaque;
 extern "c" fn td_json_client_send(client: *anyopaque, request: [*:0]const u8) void;
 extern "c" fn td_json_client_receive(client: *anyopaque, timeout: f64) ?[*:0]const u8;
@@ -487,10 +485,8 @@ pub fn main() !void {
     var client = TelegramClient.init(allocator, api_id, api_hash, target_chat_id);
     defer client.deinit();
 
-    // Start the client
     try client.start();
     
-    // Run the main event loop
     try client.run();
 
     print("\nTDLib client session completed!\n", .{});
