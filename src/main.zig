@@ -24,10 +24,11 @@ const TelegramClient = struct {
     client_id: c_int,
     is_authorized: bool,
     is_closed: bool,
+    target_chat_id: ?i64,
     
     const Self = @This();
 
-    pub fn init(allocator: Allocator, api_id: i32, api_hash: []const u8) Self {
+    pub fn init(allocator: Allocator, api_id: i32, api_hash: []const u8, target_chat_id: ?i64) Self {
         return Self{
             .allocator = allocator,
             .api_id = api_id,
@@ -35,6 +36,7 @@ const TelegramClient = struct {
             .client_id = 0,
             .is_authorized = false,
             .is_closed = false,
+            .target_chat_id = target_chat_id,
         };
     }
 
@@ -168,8 +170,19 @@ const TelegramClient = struct {
         self.send(buffer.items);
     }
 
+    pub fn openSpecificChat(self: *Self, chat_id: i64) void {
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+        
+        const writer = buffer.writer();
+        writer.print("{{\"@type\":\"openChat\",\"chat_id\":{d}}}", .{chat_id}) catch return;
+        
+        self.send(buffer.items);
+        print("📂 Opened chat {d} for monitoring\n", .{chat_id});
+    }
+
     pub fn processUpdate(self: *Self, update_json: []const u8) !void {
-        print("Received update: {s}\n", .{update_json});
+        // print("Received update: {s}\n", .{update_json});
         
         // Parse JSON to determine update type
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, update_json, .{}) catch |err| {
@@ -183,14 +196,15 @@ const TelegramClient = struct {
         if (root.get("@type")) |type_value| {
             const update_type = type_value.string;
             
-            // Only show important updates to reduce noise
-            if (std.mem.eql(u8, update_type, "updateAuthorizationState") or
+            // Only show very important updates to reduce noise
+            const show_update = std.mem.eql(u8, update_type, "updateAuthorizationState") or
                 std.mem.eql(u8, update_type, "updateNewMessage") or
                 std.mem.eql(u8, update_type, "updateConnectionState") or
                 std.mem.eql(u8, update_type, "chats") or
                 std.mem.eql(u8, update_type, "user") or
-                std.mem.eql(u8, update_type, "ok") or
-                std.mem.eql(u8, update_type, "error")) {
+                std.mem.eql(u8, update_type, "error");
+            
+            if (show_update) {
                 print("Update type: {s}\n", .{update_type});
             }
             
@@ -206,8 +220,6 @@ const TelegramClient = struct {
                 try self.handleChats(root);
             } else if (std.mem.eql(u8, update_type, "user")) {
                 try self.handleUser(root);
-            } else if (std.mem.eql(u8, update_type, "ok")) {
-                print("✅ Request completed successfully\n", .{});
             } else if (std.mem.eql(u8, update_type, "error")) {
                 try self.handleError(root);
             }
@@ -254,8 +266,14 @@ const TelegramClient = struct {
                     // Get current user info
                     self.send("{\"@type\":\"getMe\"}");
                     
-                    // Get chats to monitor for messages
-                    self.send("{\"@type\":\"getChats\",\"limit\":20}");
+                    if (self.target_chat_id) |chat_id| {
+                        print("🎯 Monitoring specific chat: {d}\n", .{chat_id});
+                        self.openSpecificChat(chat_id);
+                    } else {
+                        print("📋 Getting all chats...\n", .{});
+                        // Get chats to monitor for messages
+                        self.send("{\"@type\":\"getChats\",\"limit\":20}");
+                    }
                 } else if (std.mem.eql(u8, state_name, "authorizationStateClosed")) {
                     print("TDLib client closed\n", .{});
                     self.is_closed = true;
@@ -265,16 +283,24 @@ const TelegramClient = struct {
     }
 
     fn handleNewMessage(self: *Self, root: std.json.ObjectMap) !void {
-        _ = self;
-        print("📨 NEW MESSAGE RECEIVED!\n", .{});
-        
         if (root.get("message")) |message| {
             const msg_obj = message.object;
             
             // Get chat ID
+            var message_chat_id: i64 = 0;
             if (msg_obj.get("chat_id")) |chat_id| {
-                print("  Chat ID: {d}\n", .{chat_id.integer});
+                message_chat_id = chat_id.integer;
             }
+            
+            // If we're monitoring a specific chat, only show messages from that chat
+            if (self.target_chat_id) |target_id| {
+                if (message_chat_id != target_id) {
+                    return; // Skip messages from other chats
+                }
+            }
+            
+            print("📨 NEW MESSAGE RECEIVED!\n", .{});
+            print("  Chat ID: {d}\n", .{message_chat_id});
             
             // Get sender info
             if (msg_obj.get("sender_id")) |sender_id| {
@@ -436,11 +462,29 @@ pub fn main() !void {
         return;
     };
 
+    // Get optional target chat ID
+    var target_chat_id: ?i64 = null;
+    if (std.process.getEnvVarOwned(allocator, "TELEGRAM_CHAT_ID")) |chat_id_str| {
+        defer allocator.free(chat_id_str);
+        if (std.fmt.parseInt(i64, chat_id_str, 10)) |parsed_id| {
+            target_chat_id = parsed_id;
+        } else |err| {
+            print("Warning: Invalid TELEGRAM_CHAT_ID format: {}\n", .{err});
+        }
+    } else |_| {
+        // Environment variable not set, monitor all chats
+    }
+
     print("Starting Zefxi - TDLib Telegram Client\n", .{});
     print("API ID: {d}\n", .{api_id});
     print("API Hash: {s}...\n", .{api_hash[0..@min(8, api_hash.len)]});
+    if (target_chat_id) |chat_id| {
+        print("Target Chat ID: {d}\n", .{chat_id});
+    } else {
+        print("Monitoring: All chats\n", .{});
+    }
 
-    var client = TelegramClient.init(allocator, api_id, api_hash);
+    var client = TelegramClient.init(allocator, api_id, api_hash, target_chat_id);
     defer client.deinit();
 
     // Start the client
