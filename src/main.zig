@@ -253,7 +253,6 @@ pub fn main() !void {
         },
         else => return err,
     };
-    defer allocator.free(telegram_chat_id);
 
     const discord_server_id = std.process.getEnvVarOwned(allocator, "DISCORD_SERVER") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => {

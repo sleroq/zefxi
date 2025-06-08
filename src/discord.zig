@@ -9,7 +9,7 @@ pub const DiscordError = error{
     AuthenticationFailed,
 };
 
-pub const MessageHandler = *const fn (ctx: *anyopaque, channel_id: Discord.Snowflake, user_id: Discord.Snowflake, username: []const u8, message_text: []const u8) void;
+pub const MessageHandler = *const fn (ctx: *anyopaque, channel_id: []const u8, user_id: []const u8, username: []const u8, message_text: []const u8) void;
 
 // Global state for the Discord client (needed for callbacks)
 var global_client: ?*DiscordClient = null;
@@ -77,7 +77,14 @@ pub const DiscordClient = struct {
         // Call the message handler if set
         if (client.message_handler) |handler| {
             if (client.message_handler_ctx) |ctx| {
-                handler(ctx, message.channel_id, message.author.id, username, content);
+                // Convert Snowflakes to strings
+                const channel_id_str = std.fmt.allocPrint(client.allocator, "{}", .{message.channel_id}) catch return;
+                defer client.allocator.free(channel_id_str);
+                
+                const user_id_str = std.fmt.allocPrint(client.allocator, "{}", .{message.author.id}) catch return;
+                defer client.allocator.free(user_id_str);
+                
+                handler(ctx, channel_id_str, user_id_str, username, content);
             }
         }
     }
