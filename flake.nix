@@ -1,5 +1,5 @@
 {
-  description = "Zefxi - Telegram Client using TDLib in Zig";
+  description = "Zefxi - TDLib Telegram Client in Zig";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,24 +14,32 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
+            # Zig compiler
             zig
 
+            # TDLib - Telegram Database Library
             tdlib
+
+            # Development tools
+            gdb
+            valgrind
             
-            cmake
-            pkg-config
+            # Network debugging tools (optional)
+            wireshark
+            tcpdump
+            netcat
           ];
 
           shellHook = ''
             echo "🚀 Zefxi Development Environment"
             echo "================================"
             echo "Zig version: $(zig version)"
-            echo "TDLib available: $(pkg-config --modversion tdjson 2>/dev/null || echo "installed")"
+            echo "TDLib version: $(pkg-config --modversion tdjson 2>/dev/null || echo 'installed')"
             echo ""
             echo "Available commands:"
-            echo "  zig build test-tdlib  - Test TDLib installation"
-            echo "  zig build run         - Run the application"
+            echo "  zig build run         - Run the TDLib client"
             echo "  zig build             - Build the project"
+            echo "  zig build test        - Run tests"
             echo ""
             echo "Environment variables needed:"
             echo "  TELEGRAM_API_ID       - Your Telegram API ID"
@@ -39,16 +47,13 @@
             echo ""
             echo "Get API credentials from: https://my.telegram.org/apps"
             echo ""
+            echo "This implementation uses TDLib JSON interface"
+            echo "High-level, reliable Telegram client library!"
+            echo ""
           '';
-
-          # Environment variables for development
-          PKG_CONFIG_PATH = "${pkgs.tdlib}/lib/pkgconfig:${pkgs.openssl.dev}/lib/pkgconfig";
-          LD_LIBRARY_PATH = "${pkgs.tdlib}/lib:${pkgs.openssl.out}/lib";
-          
-          # Ensure TDLib headers are available
-          C_INCLUDE_PATH = "${pkgs.tdlib}/include";
         };
 
+        # Package the application
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "zefxi";
           version = "0.1.0";
@@ -59,11 +64,9 @@
             zig
             pkg-config
           ];
-          
+
           buildInputs = with pkgs; [
             tdlib
-            openssl
-            zlib
           ];
           
           buildPhase = ''
@@ -77,7 +80,7 @@
           '';
           
           meta = with pkgs.lib; {
-            description = "Telegram client using TDLib in Zig";
+            description = "TDLib Telegram client in Zig";
             license = licenses.mit;
             platforms = platforms.linux ++ platforms.darwin;
           };
