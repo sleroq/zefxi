@@ -12,12 +12,12 @@
       with lib;
       let
         cfg = config.services.zefxi;
-        env = zig2nix.outputs.zig-env.${pkgs.system} { 
-          zig = zig2nix.outputs.packages.${pkgs.system}.zig-master; 
+        env = zig2nix.outputs.zig-env.${pkgs.system} {
+          zig = zig2nix.outputs.packages.${pkgs.system}.zig-master;
         };
         zefxiPackage = env.package {
           src = lib.cleanSource ./.;
-          
+
           nativeBuildInputs = with pkgs; [
             pkg-config
           ];
@@ -88,7 +88,7 @@
 
           caddy = {
             enable = mkEnableOption "Caddy reverse proxy for avatar serving";
-            
+
             domain = mkOption {
               type = types.str;
               default = "localhost";
@@ -161,7 +161,7 @@
 
           services.caddy = mkIf cfg.caddy.enable {
             enable = true;
-            
+
             virtualHosts."${cfg.caddy.domain}" = {
               extraConfig = ''
                 reverse_proxy 127.0.0.1:${toString cfg.avatarPort}
@@ -174,8 +174,8 @@
     nixosModules.default = self.nixosModules.zefxi;
   } // (flake-utils.lib.eachDefaultSystem (system: let
     # Zig flake helper
-    env = zig2nix.outputs.zig-env.${system} { 
-      zig = zig2nix.outputs.packages.${system}.zig-master; 
+    env = zig2nix.outputs.zig-env.${system} {
+      zig = zig2nix.outputs.packages.${system}.zig-master;
     };
     pkgs = env.pkgs;
   in rec {
@@ -273,4 +273,4 @@
       '';
     };
   }));
-} 
+}
