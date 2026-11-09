@@ -67,29 +67,10 @@ func (c *Client) Run(ctx context.Context, h bridge.Handler) error {
 			return
 		}
 		if event.Type == "MESSAGE_UPDATE" {
-			pending.deliver(&discordgo.MessageUpdate{Message: message})
-			if !isContentUpdate(event.RawData) {
-				return
-			}
-			preserve := preserveEditedMedia(event, message)
-			queue.enqueue(ctx, func() {
-				c.handleEdit(ctx, h, message.ID, preserve)
-			})
+			c.queueEdit(ctx, h, queue, pending, event, message)
 			return
 		}
-		e := &discordgo.MessageCreate{Message: message}
-		if system, ok := c.systemMessage(message); ok {
-			queue.enqueue(ctx, func() { forwardSystem(ctx, h, system) })
-			return
-		}
-		if e.Author == nil || e.Author.Bot || e.WebhookID != "" || (e.Type != discordgo.MessageTypeDefault && e.Type != discordgo.MessageTypeReply) {
-			return
-		}
-		lookup := pending.register(e)
-		queue.enqueue(ctx, func() {
-			pending.await(ctx, e, lookup)
-			c.handleMessage(ctx, h, e)
-		})
+		c.queueMessage(ctx, h, queue, pending, message)
 	})
 	defer removeMessage()
 
@@ -151,13 +132,61 @@ func (c *Client) Run(ctx context.Context, h bridge.Handler) error {
 	return c.session.Close()
 }
 
-func (c *Client) handleEdit(ctx context.Context, h bridge.Handler, id string, preserveAttachments bool) {
+func (c *Client) ownSender(m *discordgo.Message) bool {
+	return (m.Author != nil && c.session.State.User != nil && m.Author.ID == c.session.State.User.ID) ||
+		(c.webhookID != "" && m.WebhookID == c.webhookID)
+}
+
+func (c *Client) acceptsMessage(m *discordgo.Message) bool {
+	if m.Author == nil || c.ownSender(m) {
+		return false
+	}
+	switch m.Type {
+	case discordgo.MessageTypeDefault, discordgo.MessageTypeReply, discordgo.MessageTypeChatInputCommand, discordgo.MessageTypeContextMenuCommand:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) queueMessage(ctx context.Context, h bridge.Handler, queue *eventQueue, pending *gifLookups, message *discordgo.Message) {
+	if c.ownSender(message) {
+		return
+	}
+	if system, ok := c.systemMessage(message); ok {
+		queue.enqueue(ctx, func() { forwardSystem(ctx, h, system) })
+		return
+	}
+	if !c.acceptsMessage(message) {
+		return
+	}
+	e := &discordgo.MessageCreate{Message: message}
+	lookup := pending.register(e)
+	queue.enqueue(ctx, func() {
+		pending.await(ctx, e, lookup)
+		c.handleMessage(ctx, h, e)
+	})
+}
+
+func (c *Client) queueEdit(ctx context.Context, h bridge.Handler, queue *eventQueue, pending *gifLookups, event *discordgo.Event, message *discordgo.Message) {
+	pending.deliver(&discordgo.MessageUpdate{Message: message})
+	embedOnly := !isContentUpdate(event.RawData)
+	if embedOnly && !hasUpdateField(event.RawData, "embeds") {
+		return
+	}
+	preserve := preserveEditedMedia(event, message)
+	queue.enqueue(ctx, func() {
+		c.handleEdit(ctx, h, message.ID, preserve, embedOnly)
+	})
+}
+
+func (c *Client) handleEdit(ctx context.Context, h bridge.Handler, id string, preserveAttachments, embedOnly bool) {
 	full, err := c.session.ChannelMessage(c.channelID, id, discordgo.WithContext(ctx))
 	if err != nil {
 		slog.Error("discord edited message fetch failed", "error", err)
 		return
 	}
-	if full.Author == nil || full.Author.Bot || full.WebhookID != "" || (full.Type != discordgo.MessageTypeDefault && full.Type != discordgo.MessageTypeReply) {
+	if !c.acceptsMessage(full) || (embedOnly && !full.Author.Bot && full.WebhookID == "") {
 		return
 	}
 	c.forwardMessage(ctx, h, &discordgo.MessageCreate{Message: full}, true, preserveAttachments)
@@ -217,11 +246,14 @@ func isContentUpdate(raw []byte) bool {
 }
 
 func (c *Client) forwardMessage(ctx context.Context, h bridge.Handler, e *discordgo.MessageCreate, edit bool, preserveAttachments bool) {
-	if fields := strings.Fields(e.Content); len(fields) > 0 && fields[0] == "/whois" {
+	if fields := strings.Fields(e.Content); !e.Author.Bot && e.WebhookID == "" && len(fields) > 0 && fields[0] == "/whois" {
 		c.handleWhois(ctx, h, e)
 		return
 	}
 	content, animations := c.downloadGIFs(ctx, e.Message)
+	if e.Author.Bot || e.WebhookID != "" {
+		content = appendRichEmbeds(content, e.Embeds)
+	}
 	m := bridge.Message{
 		ID: e.ID, Author: memberUser(e.Author, e.Member, c.guildID),
 		Text: richtext.FromDiscord(content), Attachments: animations, PreserveAttachments: preserveAttachments,
@@ -348,8 +380,12 @@ func (c *Client) prepareMessage(m bridge.OutboundMessage, bot bool) ([]string, [
 			content.WriteString(link)
 		} else {
 			size := max(a.Size, int64(len(a.Data)))
-			notice := "\n[Attachment unavailable: %s (%d bytes); upload limit %d bytes]"
-			fmt.Fprintf(&content, notice, a.Name, size, c.maxUploadBytes)
+			if size > c.maxUploadBytes {
+				notice := "\n[Attachment unavailable: %s (%d bytes); upload limit %d bytes]"
+				fmt.Fprintf(&content, notice, a.Name, size, c.maxUploadBytes)
+			} else {
+				fmt.Fprintf(&content, "\n[Attachment unavailable: %s (%d bytes)]", a.Name, size)
+			}
 		}
 	}
 
@@ -545,6 +581,13 @@ func (c *Client) EditParts(ctx context.Context, ids []string, m bridge.OutboundM
 		ids = ids[:len(ids)-1]
 	}
 	return ids, nil
+}
+
+func (c *Client) Delete(ctx context.Context, id string) error {
+	if err := c.session.ChannelMessageDelete(c.channelID, id, discordgo.WithContext(ctx)); err != nil {
+		return errors.New("discord: delete message failed")
+	}
+	return nil
 }
 
 func (c *Client) PinnedMessages(ctx context.Context) ([]string, error) {

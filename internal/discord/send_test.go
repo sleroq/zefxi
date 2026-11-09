@@ -42,7 +42,9 @@ func TestSendRouting(t *testing.T) {
 
 				var content string
 				_ = json.Unmarshal(payload["content"], &content)
-				if !strings.Contains(content, "https://storage.example/file?signature=ok") || !strings.Contains(content, "lost.txt (9 bytes)") {
+				if !strings.Contains(content, "https://storage.example/file?signature=ok") ||
+					!strings.Contains(content, "lost.txt (9 bytes); upload limit 4 bytes") ||
+					!strings.Contains(content, "small.txt (3 bytes)]") {
 					t.Fatalf("attachment fallback lost: %s", content)
 				}
 				if reply && !strings.HasPrefix(content, "Alice: ") {
@@ -64,6 +66,7 @@ func TestSendRouting(t *testing.T) {
 			m := bridge.OutboundMessage{Author: bridge.User{Name: "Alice"}, Text: "hello", MentionIDs: []string{"123"}, Attachments: []bridge.Attachment{
 				{Name: "large.txt", Data: []byte("oversize"), URL: "https://storage.example/file?signature=ok"},
 				{Name: "lost.txt", Size: 9},
+				{Name: "small.txt", Size: 3},
 			}}
 			if reply {
 				m.ReplyTo = "original"

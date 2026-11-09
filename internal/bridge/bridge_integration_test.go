@@ -120,6 +120,27 @@ func closeStore(t *testing.T, db *store.Store) {
 	}
 }
 
+func TestDuplicateTelegramMessageIsForwardedOnce(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, db)
+	dc := &discord{}
+	dc.prefix = "dc"
+	app := bridge.New(db, &messenger{}, dc)
+	msg := bridge.Message{ID: "10", Author: bridge.User{ID: "1"}, Text: richtext.Text{Value: "hello"}}
+	for range 2 {
+		if err := app.HandleMessage(ctx, bridge.Telegram, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(dc.messages) != 1 {
+		t.Fatalf("forwarded messages: %+v", dc.messages)
+	}
+}
+
 func TestMessageStillForwardsWhenIdentityLookupFails(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "bridge.db"))
 	if err != nil {
@@ -611,18 +632,21 @@ func TestPinSynchronization(t *testing.T) {
 		t.Fatalf("Discord changes: %+v", tg.pins)
 	}
 
-	// The Telegram service message resulting from the Discord pin must not echo.
-	if err := app.HandleTelegramPin(ctx, "2"); err != nil {
+	// Telegram events resulting from Discord pin changes must not echo.
+	if err := app.HandleTelegramPin(ctx, "2", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.HandleTelegramPin(ctx, "missing"); err != nil {
+	if err := app.HandleTelegramPin(ctx, "1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.HandleTelegramPin(ctx, "missing", true); err != nil {
 		t.Fatal(err)
 	}
 	if len(dc.pins) != 0 {
 		t.Fatalf("unexpected Discord pins: %+v", dc.pins)
 	}
 
-	if err := app.HandleTelegramPin(ctx, "1"); err != nil {
+	if err := app.HandleTelegramPin(ctx, "1", true); err != nil {
 		t.Fatal(err)
 	}
 	if len(dc.pins) != 1 || dc.pins[0] != (sentPin{"a", true}) {
@@ -634,6 +658,19 @@ func TestPinSynchronization(t *testing.T) {
 	}
 	if len(tg.pins) != 2 {
 		t.Fatalf("Discord echoed Telegram pin: %+v", tg.pins)
+	}
+	if err := app.HandleTelegramPin(ctx, "1", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(dc.pins) != 2 || dc.pins[1] != (sentPin{"a", false}) {
+		t.Fatalf("Telegram unpin: %+v", dc.pins)
+	}
+	dc.pinnedIDs = []string{"b", "unknown"}
+	if err := app.RefreshDiscordPins(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(tg.pins) != 2 {
+		t.Fatalf("Discord echoed Telegram unpin: %+v", tg.pins)
 	}
 }
 
@@ -943,6 +980,63 @@ func TestDiscordDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	links, err = db.MessageLinks(ctx, bridge.Discord, "source")
+	if err != nil || len(links) != 0 {
+		t.Fatalf("remaining links: %v, %v", links, err)
+	}
+}
+
+func TestTelegramDelete(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, db)
+
+	dc := &discord{}
+	dc.deleteFail = "b"
+	app := bridge.New(db, &messenger{}, dc)
+	for _, link := range []bridge.MessageLink{
+		{TelegramID: "source", DiscordID: "a", Origin: bridge.Telegram},
+		{TelegramID: "source", DiscordID: "b", Origin: bridge.Telegram},
+		{TelegramID: "source", DiscordID: "c", Origin: bridge.Telegram},
+		{TelegramID: "copy", DiscordID: "original", Origin: bridge.Discord},
+	} {
+		if err := db.LinkMessage(ctx, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := app.HandleTelegramDelete(ctx, "unknown"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.HandleTelegramDelete(ctx, "copy"); err != nil {
+		t.Fatal(err)
+	}
+	if len(dc.deleted) != 0 {
+		t.Fatalf("unexpected deletions: %v", dc.deleted)
+	}
+	if err := app.HandleTelegramDelete(ctx, "source"); err == nil {
+		t.Fatal("expected deletion failure")
+	}
+	if !reflect.DeepEqual(dc.deleted, []string{"a", "b", "c"}) {
+		t.Fatalf("deletions: %v", dc.deleted)
+	}
+	links, err := db.MessageLinks(ctx, bridge.Telegram, "source")
+	if err != nil || len(links) != 1 || links[0].DiscordID != "b" {
+		t.Fatalf("remaining links: %v, %v", links, err)
+	}
+	links, err = db.MessageLinks(ctx, bridge.Telegram, "copy")
+	if err != nil || len(links) != 1 {
+		t.Fatalf("copy links: %v, %v", links, err)
+	}
+	dc.deleteFail = ""
+	if err := app.HandleTelegramDelete(ctx, "source"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(dc.deleted, []string{"a", "b", "c", "b"}) {
+		t.Fatalf("retry deletions: %v", dc.deleted)
+	}
+	links, err = db.MessageLinks(ctx, bridge.Telegram, "source")
 	if err != nil || len(links) != 0 {
 		t.Fatalf("remaining links: %v, %v", links, err)
 	}

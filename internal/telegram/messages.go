@@ -194,12 +194,17 @@ func (c *Client) receiveFile(ctx context.Context, f incomingFile) (bridge.Attach
 		return a, err
 	}
 	a.Size = int64(len(a.Data))
+	return convertIncomingAnimation(ctx, a)
+}
+
+func convertIncomingAnimation(ctx context.Context, a bridge.Attachment) (bridge.Attachment, error) {
 	if !a.Animated {
 		return a, nil
 	}
 
 	gifData := a.Data
 	if !bytes.HasPrefix(gifData, []byte("GIF87a")) && !bytes.HasPrefix(gifData, []byte("GIF89a")) {
+		var err error
 		if a.ContentType == "application/x-tgsticker" {
 			gifData, err = animation.FromTGS(ctx, a.Data)
 		} else {

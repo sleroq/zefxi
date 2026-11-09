@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -16,11 +16,14 @@ import (
 
 // Client transports bridge messages to one Telegram group.
 type Client struct {
-	bot        *bot.Bot
-	chatID     int64
-	handler    bridge.Handler
-	links      map[string]linkChoice
-	nextChoice uint64
+	bot              *bot.Bot
+	botUsername      string
+	chatID           int64
+	maxDownloadBytes int64
+	botCatchupUntil  atomic.Int64
+	handler          bridge.Handler
+	links            map[string]linkChoice
+	nextChoice       uint64
 }
 type linkChoice struct {
 	messageID string
@@ -33,11 +36,12 @@ type linkChoice struct {
 
 var _ bridge.Messenger = (*Client)(nil)
 
-func New(token string, chatID int64) (*Client, error) {
-	c := &Client{chatID: chatID, links: make(map[string]linkChoice)}
+func New(token string, chatID, maxDownloadBytes int64) (*Client, error) {
+	c := &Client{chatID: chatID, maxDownloadBytes: maxDownloadBytes, links: make(map[string]linkChoice)}
 	b, err := bot.New(token,
 		bot.WithHTTPClient(time.Minute, &retryClient{client: &http.Client{Timeout: time.Minute}}),
 		bot.WithAllowedUpdates(bot.AllowedUpdates{"message", "edited_message", "message_reaction", "callback_query"}),
+		bot.WithSkipGetMe(),
 		bot.WithWorkers(1), bot.WithNotAsyncHandlers(),
 		bot.WithDefaultHandler(c.update),
 		bot.WithErrorsHandler(func(err error) { slog.Error("Telegram polling failed", "error", err) }),
@@ -45,14 +49,29 @@ func New(token string, chatID int64) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.bot = b
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	me, err := b.GetMe(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get Telegram bot identity: %w", err)
+	}
+	c.bot, c.botUsername = b, me.Username
 	return c, nil
 }
 
-func (c *Client) Run(ctx context.Context, h bridge.Handler) error {
+func (c *Client) Run(ctx context.Context, h bridge.Handler, user UserConfig) error {
 	c.handler = h
-	c.bot.Start(ctx)
-	return ctx.Err()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.bot.Start(ctx)
+	}()
+	err := c.RunUser(ctx, user, h)
+	cancel()
+	<-done
+	return err
 }
 
 func (c *Client) update(ctx context.Context, _ *bot.Bot, u *models.Update) {
@@ -65,30 +84,39 @@ func (c *Client) update(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		if m.Chat.ID != c.chatID {
 			return
 		}
-		if m.PinnedMessage != nil {
-			err = c.pin(ctx, m.PinnedMessage)
-			break
+		fromBot := c.receiveBotMessage(m.Date)
+		if fromBot {
+			if m.PinnedMessage != nil {
+				err = c.pin(ctx, m.PinnedMessage)
+				break
+			}
+			if event, ok := systemMessage(m); ok {
+				if !m.IsTopicMessage && m.MessageThreadID == 0 {
+					err = c.handler.HandleMessage(ctx, bridge.Telegram, event)
+				}
+				break
+			}
 		}
-		if event, ok := systemMessage(m); ok {
-			if !m.IsTopicMessage && m.MessageThreadID == 0 {
-				err = c.handler.HandleMessage(ctx, bridge.Telegram, event)
+		if m.From == nil || m.From.ID == c.bot.ID() {
+			return
+		}
+		if _, addressed := c.bridgeCommand(m.Text, m.From.IsBot); addressed {
+			if !m.From.IsBot {
+				_, err = c.command(ctx, m)
 			}
 			break
 		}
-		if m.From == nil || m.From.IsBot {
-			return
-		}
-		var handled bool
-		handled, err = c.command(ctx, m)
-		if !handled && err == nil && !strings.HasPrefix(m.Text, "/") {
+		if fromBot {
 			err = c.message(ctx, m)
 		}
 	case u.EditedMessage != nil:
 		m := u.EditedMessage
-		if m.Chat.ID != c.chatID || m.From == nil || m.From.IsBot || strings.HasPrefix(m.Text, "/") {
+		if !c.receiveBotMessage(m.EditDate) || m.Chat.ID != c.chatID || m.From == nil || m.From.ID == c.bot.ID() {
 			return
 		}
-		err = c.editedMessage(ctx, m)
+		if _, addressed := c.bridgeCommand(m.Text, m.From.IsBot); !addressed {
+			err = c.editedMessage(ctx, m)
+		}
 	case u.MessageReaction != nil:
 		r := u.MessageReaction
 		if r.Chat.ID != c.chatID || (r.User == nil && r.ActorChat == nil) || (r.User != nil && (r.User.IsBot || r.User.ID == c.bot.ID())) {
@@ -102,6 +130,12 @@ func (c *Client) update(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	}
 }
 
+// During user login and bot backlog catch-up, the bot preserves messages received before the user session was ready.
+func (c *Client) receiveBotMessage(date int) bool {
+	until := c.botCatchupUntil.Load()
+	return until == 0 || int64(date) <= until
+}
+
 func (c *Client) pin(ctx context.Context, message *models.MaybeInaccessibleMessage) error {
 	var id int
 	if message.Message != nil {
@@ -112,7 +146,7 @@ func (c *Client) pin(ctx context.Context, message *models.MaybeInaccessibleMessa
 	if id == 0 {
 		return nil
 	}
-	return c.handler.HandleTelegramPin(ctx, strconv.Itoa(id))
+	return c.handler.HandleTelegramPin(ctx, strconv.Itoa(id), true)
 }
 
 func user(u *models.User) bridge.User {

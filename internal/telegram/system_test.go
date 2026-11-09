@@ -38,7 +38,7 @@ func TestSystemEvents(t *testing.T) {
 	}
 }
 
-func TestSystemEventFiltering(t *testing.T) {
+func TestBotCatchupSystemEventFiltering(t *testing.T) {
 	c, h := testClient(t, func(http.ResponseWriter, *http.Request) { t.Error("unexpected request") })
 	bot := &models.User{ID: 2, FirstName: "Bot", IsBot: true}
 	for _, m := range []*models.Message{
@@ -51,7 +51,7 @@ func TestSystemEventFiltering(t *testing.T) {
 	} {
 		c.update(context.Background(), c.bot, &models.Update{Message: m})
 	}
-	if len(h.messages) != 2 || h.messages[0].ID != "1" || h.messages[1].ID != "2" {
+	if len(h.messages) != 3 || h.messages[0].ID != "1" || h.messages[1].ID != "2" || h.messages[2].ID != "6" {
 		t.Fatalf("messages: %+v", h.messages)
 	}
 }

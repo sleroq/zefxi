@@ -32,11 +32,14 @@ type recordingHandler struct {
 	viewFallback  bridge.User
 }
 
-func (h *recordingHandler) HandleTelegramPin(_ context.Context, id string) error {
-	h.pins = append(h.pins, id)
+func (h *recordingHandler) HandleTelegramPin(_ context.Context, id string, pinned bool) error {
+	if pinned {
+		h.pins = append(h.pins, id)
+	}
 	return nil
 }
-func (h *recordingHandler) RefreshDiscordPins(context.Context) error { return nil }
+func (h *recordingHandler) HandleTelegramDelete(context.Context, string) error { return nil }
+func (h *recordingHandler) RefreshDiscordPins(context.Context) error           { return nil }
 
 func (h *recordingHandler) HandleMessage(_ context.Context, _ bridge.Platform, m bridge.Message) error {
 	h.messages = append(h.messages, m)
@@ -105,7 +108,10 @@ func testClient(t *testing.T, serve http.HandlerFunc) (*Client, *recordingHandle
 		t.Fatal(err)
 	}
 	h := &recordingHandler{}
-	return &Client{bot: b, chatID: -100, handler: h, links: make(map[string]linkChoice)}, h
+	return &Client{
+		bot: b, botUsername: "mybot", chatID: -100, maxDownloadBytes: downloadLimit,
+		handler: h, links: make(map[string]linkChoice),
+	}, h
 }
 func apiOK(t *testing.T, w http.ResponseWriter, result string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -114,17 +120,85 @@ func apiOK(t *testing.T, w http.ResponseWriter, result string) {
 	}
 }
 
-func TestSlashCommandsAreNotForwarded(t *testing.T) {
+func TestBotPollingDoesNotForwardMessages(t *testing.T) {
 	c, h := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected API request: %s", r.URL.Path)
 	})
+	c.chatID = -1000000000042
+	c.botCatchupUntil.Store(1)
 	for _, text := range []string{"/unknown", "/unknown@other_bot argument", "hello /unknown"} {
 		c.update(context.Background(), c.bot, &models.Update{Message: &models.Message{
-			Chat: models.Chat{ID: -100}, From: &models.User{ID: 7}, Text: text,
+			Chat: models.Chat{ID: c.chatID}, From: &models.User{ID: 7}, Text: text, Date: 2,
 		}})
 	}
-	if len(h.messages) != 1 || h.messages[0].Text.Value != "hello /unknown" {
-		t.Fatalf("forwarded messages: %+v", h.messages)
+	if len(h.messages) != 0 {
+		t.Fatalf("bot polling forwarded messages: %+v", h.messages)
+	}
+}
+
+func TestBotCatchupRoutesCommandsAndBotMessages(t *testing.T) {
+	calls := 0
+	c, h := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "sendMessage") {
+			t.Errorf("unexpected API request: %s", r.URL.Path)
+		}
+		calls++
+		apiOK(t, w, `{"message_id":10}`)
+	})
+
+	for _, tc := range []struct {
+		id     int
+		sender models.User
+		text   string
+	}{
+		{1, models.User{ID: 7}, "/link@other_bot"},
+		{2, models.User{ID: 7}, "/dance"},
+		{3, models.User{ID: 7}, "/unknown@mybot"},
+		{4, models.User{ID: 7}, "/link@MYBOT"},
+		{5, models.User{ID: 8, IsBot: true}, "/whois"},
+		{6, models.User{ID: 8, IsBot: true}, "other bot reply"},
+		{7, models.User{ID: 123, IsBot: true}, "bridge bot reply"},
+	} {
+		c.update(context.Background(), c.bot, &models.Update{Message: &models.Message{
+			ID: tc.id, Chat: models.Chat{ID: c.chatID}, From: &tc.sender, Text: tc.text,
+		}})
+	}
+
+	for _, tc := range []struct {
+		id   int
+		text string
+	}{{8, "/link@other_bot"}, {9, "/link@mybot"}} {
+		c.update(context.Background(), c.bot, &models.Update{EditedMessage: &models.Message{
+			ID: tc.id, Chat: models.Chat{ID: c.chatID}, From: &models.User{ID: 7}, Text: tc.text,
+		}})
+	}
+
+	if calls != 1 || len(h.messages) != 5 {
+		t.Fatalf("API calls=%d messages=%+v", calls, h.messages)
+	}
+	for i, id := range []string{"1", "2", "5", "6", "8"} {
+		if h.messages[i].ID != id {
+			t.Fatalf("messages=%+v", h.messages)
+		}
+	}
+}
+
+func TestBotCatchesMessagesDuringUserLogin(t *testing.T) {
+	c, h := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected API request: %s", r.URL.Path)
+	})
+	c.chatID = -1000000000042
+	send := func(id, date int) {
+		c.update(context.Background(), c.bot, &models.Update{Message: &models.Message{
+			ID: id, Date: date, Chat: models.Chat{ID: c.chatID}, From: &models.User{ID: 7}, Text: "hello",
+		}})
+	}
+	send(1, 5)
+	c.botCatchupUntil.Store(10)
+	send(2, 9)
+	send(3, 11)
+	if len(h.messages) != 2 || h.messages[0].ID != "1" || h.messages[1].ID != "2" {
+		t.Fatalf("bot catch-up messages: %+v", h.messages)
 	}
 }
 
@@ -134,17 +208,17 @@ func TestIncomingOversizeKeepsNoticeAndUTF16Entities(t *testing.T) {
 		apiOK(t, w, `true`)
 	})
 
-	c.update(context.Background(), c.bot, &models.Update{
-		Message: &models.Message{
-			ID:             9,
-			Chat:           models.Chat{ID: -100},
-			From:           &models.User{ID: 7, FirstName: "Ada"},
-			Text:           "😀bold",
-			Entities:       []models.MessageEntity{{Type: "bold", Offset: 2, Length: 4}},
-			ReplyToMessage: &models.Message{ID: 8},
-			Document:       &models.Document{FileID: "large", FileName: "large.zip", FileSize: downloadLimit + 1},
-		},
-	})
+	if err := c.message(context.Background(), &models.Message{
+		ID:             9,
+		Chat:           models.Chat{ID: -100},
+		From:           &models.User{ID: 7, FirstName: "Ada"},
+		Text:           "😀bold",
+		Entities:       []models.MessageEntity{{Type: "bold", Offset: 2, Length: 4}},
+		ReplyToMessage: &models.Message{ID: 8},
+		Document:       &models.Document{FileID: "large", FileName: "large.zip", FileSize: downloadLimit + 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if len(h.messages) != 1 {
 		t.Fatalf("messages: %+v", h.messages)
 	}
@@ -346,21 +420,25 @@ func TestEditedMessageIsForwarded(t *testing.T) {
 	message := &models.Message{
 		ID: 17, Chat: models.Chat{ID: -100}, From: &models.User{ID: 7, FirstName: "Alice"}, Text: "edited",
 	}
-	c.update(context.Background(), c.bot, &models.Update{EditedMessage: message})
+	if err := c.editedMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
 	if len(h.messages) != 1 || h.messages[0].ID != "17" || h.messages[0].Text.Value != "edited" {
 		t.Fatalf("edited messages: %+v", h.messages)
 	}
 }
 
-func TestPinServiceMessageBeforeSenderFilter(t *testing.T) {
+func TestBotPollingDoesNotForwardPins(t *testing.T) {
 	c, h := testClient(t, func(w http.ResponseWriter, r *http.Request) { t.Errorf("unexpected request: %s", r.URL.Path) })
-	for _, chat := range []int64{-100, -200} {
+	c.chatID = -1000000000042
+	c.botCatchupUntil.Store(1)
+	for _, chat := range []int64{c.chatID, -1000000000043} {
 		c.update(context.Background(), c.bot, &models.Update{Message: &models.Message{
-			Chat: models.Chat{ID: chat}, From: &models.User{IsBot: true},
+			Chat: models.Chat{ID: chat}, From: &models.User{IsBot: true}, Date: 2,
 			PinnedMessage: &models.MaybeInaccessibleMessage{InaccessibleMessage: &models.InaccessibleMessage{MessageID: 42}},
 		}})
 	}
-	if len(h.pins) != 1 || h.pins[0] != "42" || len(h.messages) != 0 {
+	if len(h.pins) != 0 || len(h.messages) != 0 {
 		t.Fatalf("pins=%v messages=%v", h.pins, h.messages)
 	}
 }

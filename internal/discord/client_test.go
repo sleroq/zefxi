@@ -2,12 +2,14 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/sleroq/zefxi/internal/bridge"
@@ -192,26 +194,101 @@ func (h *editHandler) HandleEdit(_ context.Context, _ bridge.Platform, m bridge.
 	h.edits = append(h.edits, m)
 	return nil
 }
-func TestEditFetchesFullMessageAndFiltersAuthors(t *testing.T) {
+func TestCreateAndEditFilterMessages(t *testing.T) {
 	c, err := New("token", "guild", "channel", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &editHandler{}
-	payload := `{"id":"42","content":"full content","author":{"id":"5","username":"Alice"},"type":0}`
+	c.session.State.User = &discordgo.User{ID: "own-bot"}
+	c.webhookID = "own-webhook"
+	var payload []byte
 	c.session.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Method != "GET" || !strings.HasSuffix(r.URL.Path, "/channels/channel/messages/42") {
-			t.Fatalf("request %s %s", r.Method, r.URL.Path)
-		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload))}, nil
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(string(payload))),
+		}, nil
 	})}
-	c.handleEdit(context.Background(), h, "42", true)
-	if len(h.edits) != 1 || h.edits[0].Text.Value != "full content" || !h.edits[0].PreserveAttachments {
-		t.Fatalf("edits: %+v", h.edits)
+
+	for _, tc := range []struct {
+		name    string
+		author  *discordgo.User
+		webhook string
+		typ     discordgo.MessageType
+		accept  bool
+	}{
+		{"human", &discordgo.User{ID: "human"}, "", discordgo.MessageTypeDefault, true},
+		{"own bot reply", &discordgo.User{ID: "own-bot", Bot: true}, "", discordgo.MessageTypeReply, false},
+		{"own webhook", &discordgo.User{ID: "webhook-user", Bot: true}, "own-webhook", discordgo.MessageTypeDefault, false},
+		{"other bot reply", &discordgo.User{ID: "other-bot", Bot: true}, "", discordgo.MessageTypeReply, true},
+		{"other webhook", &discordgo.User{ID: "other-webhook-user", Bot: true}, "other-webhook", discordgo.MessageTypeDefault, true},
+		{"chat input response", &discordgo.User{ID: "other-bot", Bot: true}, "", discordgo.MessageTypeChatInputCommand, true},
+		{"context menu response", &discordgo.User{ID: "other-bot", Bot: true}, "", discordgo.MessageTypeContextMenuCommand, true},
+		{"missing author", nil, "", discordgo.MessageTypeDefault, false},
+		{"unsupported", &discordgo.User{ID: "human"}, "", discordgo.MessageTypeChannelNameChange, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := &discordgo.Message{
+				ID: "42", GuildID: "guild", ChannelID: "channel", Content: "full content",
+				Author: tc.author, WebhookID: tc.webhook, Type: tc.typ,
+			}
+			payload, err = json.Marshal(message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			queue := newEventQueue(ctx)
+			h := &messageHandler{}
+			c.queueMessage(ctx, h, queue, newGIFLookups(time.Millisecond), message)
+			done := make(chan struct{})
+			queue.enqueue(ctx, func() { close(done) })
+			<-done
+			cancel()
+			<-queue.done
+			if (h.message.ID != "") != tc.accept {
+				t.Errorf("create forwarded: %+v", h.message)
+			}
+			edits := &editHandler{}
+			c.handleEdit(context.Background(), edits, "42", true, false)
+			if (len(edits.edits) != 0) != tc.accept {
+				t.Fatalf("edits: %+v", edits.edits)
+			}
+			if tc.accept && (edits.edits[0].Text.Value != "full content" || !edits.edits[0].PreserveAttachments) {
+				t.Fatalf("edit content: %+v", edits.edits[0])
+			}
+		})
 	}
-	payload = `{"id":"42","content":"ignored","author":{"id":"5","bot":true},"type":0}`
-	c.handleEdit(context.Background(), h, "42", false)
-	if len(h.edits) != 1 {
-		t.Fatal("bot edit forwarded")
+}
+
+func TestMessageFilterWithoutOwnIDs(t *testing.T) {
+	c, err := New("token", "guild", "channel", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := &discordgo.Message{Author: &discordgo.User{ID: "other", Bot: true}}
+	if !c.acceptsMessage(message) {
+		t.Fatal("other bot rejected before own IDs are configured")
+	}
+}
+
+func TestOwnBotSystemMessageNotForwarded(t *testing.T) {
+	c, err := New("token", "guild", "channel", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.session.State.User = &discordgo.User{ID: "own-bot"}
+	ctx, cancel := context.WithCancel(context.Background())
+	queue := newEventQueue(ctx)
+	h := &messageHandler{}
+	c.queueMessage(ctx, h, queue, newGIFLookups(time.Millisecond), &discordgo.Message{
+		ID: "pin", GuildID: "guild", ChannelID: "channel", Type: discordgo.MessageTypeChannelPinnedMessage,
+		Author: &discordgo.User{ID: "own-bot", Bot: true},
+	})
+	done := make(chan struct{})
+	queue.enqueue(ctx, func() { close(done) })
+	<-done
+	cancel()
+	<-queue.done
+	if h.message.ID != "" {
+		t.Fatal("own pin service message forwarded")
 	}
 }

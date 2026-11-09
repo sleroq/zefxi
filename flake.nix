@@ -33,7 +33,7 @@
                 ./internal
               ];
             };
-            vendorHash = "sha256-fTQijc4I1k+VL5OXmjNIMeDIaUcMIDcl5S/4HaZlYN8=";
+            vendorHash = "sha256-DwXqZcMhHyyE0Fp5OTDcI2aEFp18sF1ZQm0PAisFi9U=";
             subPackages = [ "cmd/zefxi" ];
             env.CGO_ENABLED = "1";
             nativeBuildInputs = with pkgs; [

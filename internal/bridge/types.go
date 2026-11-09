@@ -115,8 +115,9 @@ type Handler interface {
 	HandleMessage(context.Context, Platform, Message) error
 	HandleEdit(context.Context, Platform, Message) error
 	HandleDiscordDelete(context.Context, string) error
+	HandleTelegramDelete(context.Context, string) error
 	HandleReaction(context.Context, Platform, Reaction) error
-	HandleTelegramPin(context.Context, string) error
+	HandleTelegramPin(context.Context, string, bool) error
 	RefreshDiscordPins(context.Context) error
 	LinkCandidates(context.Context, User, string) ([]LinkCandidate, error)
 	UnlinkUser(context.Context, string) error
@@ -140,6 +141,7 @@ type TelegramClient interface {
 
 type DiscordClient interface {
 	Messenger
+	Delete(context.Context, string) error
 	EditParts(context.Context, []string, OutboundMessage) ([]string, error)
 	FindUsers(context.Context, string) ([]User, error)
 	GuildMembers(context.Context) ([]User, error)

@@ -23,14 +23,31 @@ func (c *Client) control(ctx context.Context, m *models.Message, text string, ma
 	return err
 }
 
+func (c *Client) bridgeCommand(text string, fromBot bool) (string, bool) {
+	if !strings.HasPrefix(text, "/") {
+		return "", false
+	}
+	name, target, targeted := strings.Cut(strings.Fields(text)[0], "@")
+	if targeted {
+		return name, strings.EqualFold(target, c.botUsername)
+	}
+	if !fromBot {
+		switch name {
+		case "/whois", "/reacts", "/link":
+			return name, true
+		}
+	}
+	return name, false
+}
+
 func (c *Client) command(ctx context.Context, m *models.Message) (bool, error) {
-	fields := strings.Fields(m.Text)
-	if len(fields) == 0 {
+	command, addressed := c.bridgeCommand(m.Text, m.From.IsBot)
+	if !addressed {
 		return false, nil
 	}
 
+	fields := strings.Fields(m.Text)
 	l := language(m.From.LanguageCode)
-	command, _, _ := strings.Cut(fields[0], "@")
 	switch command {
 	case "/whois":
 		return true, c.whois(ctx, m)
@@ -69,7 +86,7 @@ func (c *Client) command(ctx context.Context, m *models.Message) (bool, error) {
 		}
 		return true, c.control(ctx, m, linkText(view, l), linkKeyboard(key, view, 0, l))
 	}
-	return false, nil
+	return true, nil
 }
 
 func linkText(view bridge.LinkView, l locale) string {

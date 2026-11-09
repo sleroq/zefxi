@@ -131,3 +131,26 @@ func TestWhoisCommandRequiresExactToken(t *testing.T) {
 		t.Fatal("non-command not forwarded")
 	}
 }
+
+func TestWhoisFromBotsAndWebhooksIsForwarded(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bot     bool
+		webhook string
+	}{
+		{"bot", true, ""},
+		{"webhook", true, "other-webhook"},
+		{"webhook without bot flag", false, "other-webhook"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{}
+			h := &messageHandler{}
+			c.handleMessage(context.Background(), h, &discordgo.MessageCreate{Message: &discordgo.Message{
+				ID: "command", Content: "/whois", Author: &discordgo.User{ID: "author", Bot: tc.bot}, WebhookID: tc.webhook,
+			}})
+			if h.message.ID != "command" || h.message.Text.Value != "/whois" {
+				t.Fatalf("message: %+v", h.message)
+			}
+		})
+	}
+}

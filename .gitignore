@@ -6,6 +6,7 @@ result
 result-*
 
 /zefxi
+/telegram-session/
 *.db
 *.db-shm
 *.db-wal

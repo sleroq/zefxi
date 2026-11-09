@@ -7,21 +7,25 @@ import (
 )
 
 // HandleTelegramPin maps a service message to its Discord counterpart.
-func (b *Bridge) HandleTelegramPin(ctx context.Context, id string) error {
+func (b *Bridge) HandleTelegramPin(ctx context.Context, id string, pinned bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	link, found, err := b.store.MessageLink(ctx, Telegram, id)
 	if err != nil || !found {
 		return err
 	}
-	if b.discordPins[link.DiscordID] {
+	if b.discordPins != nil && b.discordPins[link.DiscordID] == pinned {
 		return nil
 	}
-	if err := b.discord.SetPin(ctx, link.DiscordID, true); err != nil {
-		return fmt.Errorf("pin Discord message %s: %w", link.DiscordID, err)
+	if err := b.discord.SetPin(ctx, link.DiscordID, pinned); err != nil {
+		return fmt.Errorf("set Discord pin for message %s: %w", link.DiscordID, err)
 	}
 	if b.discordPins != nil {
-		b.discordPins[link.DiscordID] = true
+		if pinned {
+			b.discordPins[link.DiscordID] = true
+		} else {
+			delete(b.discordPins, link.DiscordID)
+		}
 	}
 	return nil
 }

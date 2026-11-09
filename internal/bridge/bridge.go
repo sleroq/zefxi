@@ -31,6 +31,12 @@ func (b *Bridge) HandleMessage(ctx context.Context, source Platform, msg Message
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if msg.ID != "" {
+		_, found, err := b.store.MessageLink(ctx, source, msg.ID)
+		if err != nil || found {
+			return err
+		}
+	}
 	out, target, err := b.convertMessage(ctx, source, msg)
 	if err != nil {
 		return err
@@ -69,6 +75,30 @@ func (b *Bridge) HandleDiscordDelete(ctx context.Context, id string) error {
 		}
 		if err := b.telegram.Delete(ctx, link.TelegramID); err != nil {
 			result = errors.Join(result, fmt.Errorf("delete telegram message %s: %w", link.TelegramID, err))
+			continue
+		}
+		if err := b.store.DeleteMessageLink(ctx, link); err != nil {
+			result = errors.Join(result, fmt.Errorf("delete message link: %w", err))
+		}
+	}
+	return result
+}
+
+func (b *Bridge) HandleTelegramDelete(ctx context.Context, id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	links, err := b.store.MessageLinks(ctx, Telegram, id)
+	if err != nil {
+		return err
+	}
+	var result error
+	for _, link := range links {
+		if link.Origin != Telegram {
+			continue
+		}
+		if err := b.discord.Delete(ctx, link.DiscordID); err != nil {
+			result = errors.Join(result, fmt.Errorf("delete discord message %s: %w", link.DiscordID, err))
 			continue
 		}
 		if err := b.store.DeleteMessageLink(ctx, link); err != nil {
