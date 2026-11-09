@@ -1,152 +1,62 @@
-# Zefxi - Telegram to Discord Bridge
+# Zefxi
 
-A high-fidelity Telegram to Discord bridge written in Zig, designed to seamlessly sync messages, reactions, and user interactions between Telegram supergroups and Discord channels.
+Zefxi bridges Telegram group to one Discord channel
 
-## Current Status
-
-✅ **Working Bridge**: The bridge is currently functional with basic message forwarding from Telegram to Discord  
-⚠️ **Limitations**: Currently missing reply support and user spoofing on Discord side  
-🔧 **In Development**: Working towards full bidirectional sync with user spoofing and reply preservation  
+This project exists because [Matterbridge wasn't good enough for me.](#Features-comparison)
 
 ## Features
 
-- ✅ **Telegram to Discord Sync**: Forward messages from Telegram supergroups to Discord channels
-- ✅ **Discord to Telegram Sync**: Forward messages from Telegram supergroups to Discord channels
-- ✅ **Real-time Message Processing**: Instant message forwarding with minimal latency
-- ✅ **Telegram Authentication**: Complete Telegram authentication flow with TDLib
-- ✅ **Discord Bot Integration**: Basic Discord bot integration for message posting
-- ✅ **User Spoofing**: Discord webhook profiles for Telegram users with avatars
-- ✅ **Universal Attachment Bridging**: All Telegram attachment types supported:
-  - 📸 Photos, 📄 Documents, 🎥 Videos, 🎵 Audio, 🎤 Voice Messages
-  - 📹 Video Notes, 🎭 Stickers, 🎞️ Animations/GIFs
-  - Smart display: Visual content uses embeds, files use download links
-- ❌ **Reply Threading**: Reply chain preservation not yet implemented
-- ❌ **Reaction Mirroring**: Reaction sync not yet implemented
-
-## Roadmap
-
-- ✅ TDLib JSON interface integration
-- ✅ Telegram authentication flow
-- ✅ Real-time message receiving
-- ✅ Message filtering (ignores own messages)
-- ✅ Basic Discord bot integration
-- ✅ Bridge architecture with threaded clients
-- ✅ Telegram to Discord message forwarding
-- ✅ Discord webhook integration for user spoofing
-- ✅ User avatar and name caching
-- ✅ Image/photo forwarding from Telegram to Discord
-- 🚧 Reply chain preservation and threading
-- 🚧 Bidirectional message forwarding (Discord to Telegram)
-- 🚧 Reaction synchronization
-- 🚧 Message editing sync
-- 🚧 File/media forwarding (documents, videos, etc.)
-- 🚧 Full Discord WebSocket integration
-
-## Prerequisites
-
-Install Nix package manager and use the provided development environment:
-
-```bash
-nix develop
-```
+- Reactions
+- Reply chains
+- Message edits
+- Spoof username and profile picture on discord side (replies look like they were sent by the user)
+- Auto-matching user accounts with the same usernames
+- Linking user accounts manually with optional many-many relations (2 telegram accounts will show up as 1 discord user)
+- Markdown formatting including spoilers and quotes
+- GIFs, stickers, Telegram Premium emojis are properly converted and show up correctly
+- Pinned messages (though deleting unpinning is not synced to discord)
+- System events (joins, leaves, chat picture change)
 
 ## Setup
 
-1. **Get your Telegram API credentials from [my.telegram.org](https://my.telegram.org/apps)**
+1. Create a Telegram bot
+    - add it to the group as an administrator (required to recieve reaction updates)
+    - disable its privacy mode in BotFather so it receives group messages
+2. Create a Discord bot
+    - Enable the **Message Content** and **Server Members** privileged intents.
+    - Add bot to the server, and give it access to the channel, including manage webhooks, send messages, read message history, add reactions and attach files.
+3. Copy `.env.example` to `.env` and fill in all your info
+4. Run with nix `nix run github:sleroq/zefxi`, or with docker.
 
-2. **Create a Discord bot at [Discord Developer Portal](https://discord.com/developers/applications)**
-   - Enable necessary bot permissions for your target channel
-   - Get the bot token
+### Runtime dependencies for running outside of nix and docker
 
-3. **Configure environment variables:**
-   ```bash
-   export TELEGRAM_API_ID="your_api_id"
-   export TELEGRAM_API_HASH="your_api_hash"
-   export TELEGRAM_CHAT_ID="supergroup_id_to_bridge"  # Optional, monitors all chats if not set
-   export DISCORD_TOKEN="your_discord_bot_token"
-   export DISCORD_CHANNEL="channel_id_to_bridge"
-   export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"  # Required for user spoofing
-   export AVATAR_BASE_URL="https://bore.pub:44198"   # Optional, defaults to http://127.0.0.1:8080
-   export DEBUG="1"                                   # Optional, enables debug logging
-   ```
+- [LottieConverter](https://github.com/sot-tech/LottieConverter)
+- [ffmpeg v9+](https://ffmpeg.org/download.html)
 
-4. **Run the bridge:**
-   ```bash
-   nix develop --command zig build run
-   ```
-   
-   Or build and run separately:
-   ```bash
-   nix develop --command zig build
-   ./zig-out/bin/zefxi
-   ```
+## Features and limitations
 
-## Development
+- Only underlying emoji's of Telegram Premium custom reactions are forwarded to Discord side
+- Multiple reactions from on the Discord side will result in just one reactions on Telegram. But you can check detailed info about who liked with `/reacts` command
+- Messages of any bot won't be forwarded both directions, the reason is - telegram bots can't see each other unless explicitly tagged or replied
+- All bot commands are intentionally not forwarded to the discord
+- Files over 20MB won't be bridged to the Discord side, no fallback is provided here
 
-For easier development, copy the example environment file and fill in your values:
+## Features comparison (2026.10.09)
 
-```bash
-cp .env.example .env
-# Edit .env with your actual credentials
-```
-
-The `.env` file should contain:
-```bash
-export TELEGRAM_API_ID="your_api_id"
-export TELEGRAM_API_HASH="your_api_hash"
-export TELEGRAM_CHAT_ID="supergroup_id_to_bridge"  # Optional
-export DISCORD_TOKEN="your_discord_bot_token"
-export DISCORD_CHANNEL="channel_id_to_bridge"
-export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"  # Required for user spoofing
-export AVATAR_BASE_URL="https://bore.pub:44198"  # Optional, defaults to http://127.0.0.1:8080
-export DEBUG="1"  # Optional, enables detailed logging
-```
-
-Then source it and run:
-```bash
-source .env
-nix develop --command zig build run
-```
-
-Or combine in one line:
-```bash
-source .env && nix develop --command zig build run
-```
-
-**Note**: Make sure to add `.env` to your `.gitignore` to avoid committing sensitive credentials.
-
-## Upcoming Features
-
-The next major development phases will include:
-
-- **User Spoofing**: Discord webhooks to create fake user profiles matching Telegram users
-- **Reply Support**: Preserving and recreating reply chains across platforms  
-- **Bidirectional Sync**: Discord to Telegram message forwarding
-- **Rich Media**: File, image, and other media forwarding
-- **Reactions**: Cross-platform reaction synchronization
-
-## Core Architecture
-
-- **Telegram Integration**: TDLib JSON interface for robust Telegram connectivity
-- **Discord Integration**: Discord bot API with planned webhook support for user spoofing
-- **Message Pipeline**: Efficient message processing and transformation pipeline
-- **Threaded Design**: Separate threads for Telegram and Discord clients
-- **Future: User Management**: Dynamic Discord webhook creation and caching for Telegram users
-- **Future: Reaction Engine**: Real-time reaction synchronization between platforms
-
-## Debugging
-
-Enable debug mode for detailed logging:
-```bash
-export DEBUG="1"
-```
-
-This will show:
-- Full message JSON from Telegram (when debug enabled)
-- Message processing steps
-- Discord API interactions
-- User ID tracking and filtering
-
-## License
-
-MIT License
+| Feature                   | Matterbridge                                    | zefxi                                                        |
+| ------------------------- | ----------------------------------------------- | ------------------------------------------------------------ |
+| Topology                  | Multiple channels and services                  | One Telegram chat ↔ one Discord channel                      |
+| Text                      | ✔️                                              | ✔️                                                           |
+| Edits                     | ✔️                                              | ✔️                                                           |
+| Deletes                   | Discord → Telegram only                         | Discord → Telegram only                                      |
+| Replies                   | ✔️                                              | ✔️                                                           |
+| Sender identity           | Names and avatars                               | Names and avatars; cross-platform account linking            |
+| Mentions                  | Mostly translated to readable names             | Linked accounts receive translated mentions                  |
+| Rich text                 | Partial                                         | ✔️                                                           |
+| Telegram media → Discord  | Files, photos, video, audio, voice and stickers | Same, plus animations and video notes                        |
+| Discord media → Telegram  | Attachment URLs                                 | Native media uploads; URL fallback                           |
+| Stickers and custom emoji | Only Telegram sticker conversion                | Discord sticker and limited Telegram custom emoji conversion |
+| Reactions                 | -                                               | Aggregated bot reactions both ways                           |
+| Pins                      | -                                               | Telegram pins; Discord pins and unpins                       |
+| System events             | Join/leave events                               | Join/leave and selected chat changes                         |
+| Telegram topics           | Supported for routing                           | -                                                            |

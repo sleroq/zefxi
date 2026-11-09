@@ -1,0 +1,12 @@
+services:
+  zefxi:
+    image: zefxi:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SQLITE_PATH: /data/zefxi.db
+    volumes:
+      - zefxi-data:/data
+
+volumes:
+  zefxi-data:

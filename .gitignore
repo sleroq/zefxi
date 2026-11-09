@@ -1,10 +1,11 @@
-.zig-cache/
-zig-out/
-
+.direnv/
 .env
 .envrc.local
 
 result
 result-*
 
-tdlib/
+/zefxi
+*.db
+*.db-shm
+*.db-wal
