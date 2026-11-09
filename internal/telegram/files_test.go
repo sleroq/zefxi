@@ -83,3 +83,10 @@ func TestSetReactionSetsAndClearsSingleEmoji(t *testing.T) {
 		t.Fatalf("reactions: %v", reactions)
 	}
 }
+
+func TestBotVoiceMetadata(t *testing.T) {
+	files := messageFiles(&models.Message{Voice: &models.Voice{FileID: "voice", Duration: 17, MimeType: "audio/ogg"}})
+	if len(files) != 1 || files[0].attachment.Voice == nil || files[0].attachment.Voice.Duration != 17 || len(files[0].attachment.Voice.Waveform) != 0 {
+		t.Fatalf("files: %+v", files)
+	}
+}

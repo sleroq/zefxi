@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/gotd/contrib/storage"
@@ -21,7 +22,8 @@ func TestUserMediaConversion(t *testing.T) {
 	}{
 		{"photo", &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 5, Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{Type: "s", W: 10, H: 10, Size: 100}, &tg.PhotoSize{Type: "x", W: 100, H: 100, Size: 1000}}}}, "photo.jpg", false},
 		{"voice", &tg.MessageMediaDocument{Voice: true, Document: &tg.Document{MimeType: "audio/ogg"}}, "voice.ogg", false},
-		{"video note", &tg.MessageMediaDocument{Round: true, Document: &tg.Document{MimeType: "video/mp4"}}, "video-note.mp4", false},
+		{"video note", &tg.MessageMediaDocument{Round: true, Document: &tg.Document{MimeType: "video/mp4", Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeAudio{}, &tg.DocumentAttributeVideo{RoundMessage: true}}}}, "video-note.mp4", false},
+		{"audio", &tg.MessageMediaDocument{Document: &tg.Document{MimeType: "audio/mpeg", Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeAudio{}}}}, "audio.mp3", false},
 		{"sticker", &tg.MessageMediaDocument{Document: &tg.Document{MimeType: "application/x-tgsticker", Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeSticker{}}}}, "sticker.tgs", true},
 		{"animation", &tg.MessageMediaDocument{Document: &tg.Document{MimeType: "video/mp4", Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeAnimated{}}}}, "animation.mp4", true},
 	}
@@ -104,5 +106,14 @@ func TestUserAuthorFromPeerStorage(t *testing.T) {
 	author := userAuthor(context.Background(), peers, tg.Entities{}, &tg.PeerUser{UserID: 42})
 	if author.ID != "42" || author.Name != "Cached" || author.Username != "cached" {
 		t.Fatalf("author %+v", author)
+	}
+}
+
+func TestUserVoiceMetadata(t *testing.T) {
+	a, _ := userFile(&tg.MessageMediaDocument{Document: &tg.Document{MimeType: "audio/ogg", Attributes: []tg.DocumentAttributeClass{
+		&tg.DocumentAttributeAudio{Voice: true, Duration: 12, Waveform: []byte{0xe0, 0x03}},
+	}}})
+	if a.Voice == nil || a.Voice.Duration != 12 || !slices.Equal(a.Voice.Waveform, []byte{0, 255, 0}) {
+		t.Fatalf("voice metadata: %+v", a.Voice)
 	}
 }

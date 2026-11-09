@@ -368,3 +368,120 @@ func TestEditPartsGrowAndShrink(t *testing.T) {
 		})
 	}
 }
+
+func TestSendVoiceAndEditCaption(t *testing.T) {
+	for _, reply := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reply=%t", reply), func(t *testing.T) {
+			c, err := New("token", "guild", "channel", 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.webhookID, c.webhookToken = "123", "secret"
+			c.session.Client = &http.Client{Transport: voiceTestTransport(t, reply)}
+
+			m := bridge.OutboundMessage{
+				Author: bridge.User{Name: "Alice"}, Text: "caption",
+				Attachments: []bridge.Attachment{{
+					Name: "voice.ogg", ContentType: "audio/ogg", Data: []byte("audio"),
+					Voice: &bridge.Voice{Duration: 12, Waveform: []byte{0, 255}},
+				}},
+			}
+			if reply {
+				m.ReplyTo = "original"
+			}
+			ids, err := c.Send(context.Background(), m)
+			if err != nil || fmt.Sprint(ids) != "[caption voice]" {
+				t.Fatalf("send: %v %v", ids, err)
+			}
+			m.Text = "edited"
+			m.Attachments = nil
+			m.PreserveAttachments = true
+			ids, err = c.EditParts(context.Background(), ids, m)
+			if err != nil || fmt.Sprint(ids) != "[caption voice]" {
+				t.Fatalf("edit: %v %v", ids, err)
+			}
+		})
+	}
+}
+
+func voiceTestTransport(t *testing.T, reply bool) roundTripFunc {
+	t.Helper()
+
+	calls := 0
+	return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body := `{}`
+		switch {
+		case r.Method == http.MethodPost && calls == 1:
+			var p struct {
+				Content   string `json:"content"`
+				Username  string `json:"username"`
+				Reference *struct {
+					ID string `json:"message_id"`
+				} `json:"message_reference"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+				t.Fatal(err)
+			}
+			if reply {
+				if p.Content != "Alice: caption" || p.Reference == nil || p.Reference.ID != "original" {
+					t.Fatalf("reply: %+v", p)
+				}
+			} else if p.Content != "caption" || p.Username != "Alice" {
+				t.Fatalf("identity: %+v", p)
+			}
+			body = `{"id":"caption"}`
+		case r.Method == http.MethodPost && calls == 2:
+			if !strings.HasSuffix(r.URL.Path, "/channels/channel/messages") {
+				t.Fatalf("voice endpoint: %s", r.URL)
+			}
+			reader, err := r.MultipartReader()
+			if err != nil {
+				t.Fatal(err)
+			}
+			part, err := reader.NextPart()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var p struct {
+				Flags       int    `json:"flags"`
+				Content     string `json:"content"`
+				Attachments []struct {
+					ID       int    `json:"id"`
+					Filename string `json:"filename"`
+					Duration int    `json:"duration_secs"`
+					Waveform []byte `json:"waveform"`
+				} `json:"attachments"`
+			}
+			if err := json.NewDecoder(part).Decode(&p); err != nil {
+				t.Fatal(err)
+			}
+			if p.Flags != 8192 || p.Content != "" || len(p.Attachments) != 1 || p.Attachments[0].ID != 0 || p.Attachments[0].Filename != "voice.ogg" || p.Attachments[0].Duration != 12 || string(p.Attachments[0].Waveform) != "\x00\xff" {
+				t.Fatalf("voice payload: %+v", p)
+			}
+			part, err = reader.NextPart()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := io.ReadAll(part)
+			if part.FormName() != "files[0]" || string(data) != "audio" {
+				t.Fatalf("file: %s %q", part.FormName(), data)
+			}
+			if _, err := reader.NextPart(); err != io.EOF {
+				t.Fatalf("extra file: %v", err)
+			}
+			body = `{"id":"voice"}`
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/voice"):
+			body = `{"id":"voice","flags":8192}`
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/caption"):
+			body = `{"id":"caption","webhook_id":"123"}`
+			if reply {
+				body = `{"id":"caption","message_reference":{"message_id":"original"}}`
+			}
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/caption"):
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+}

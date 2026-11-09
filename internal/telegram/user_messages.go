@@ -243,6 +243,7 @@ func userFile(media tg.MessageMediaClass) (bridge.Attachment, tg.InputFileLocati
 		sticker := false
 		video := m.Video
 		voice := m.Voice
+		var audio *tg.DocumentAttributeAudio
 		round := m.Round
 
 		for _, attr := range d.Attributes {
@@ -258,9 +259,7 @@ func userFile(media tg.MessageMediaClass) (bridge.Attachment, tg.InputFileLocati
 				round = round || x.RoundMessage
 			case *tg.DocumentAttributeAudio:
 				voice = voice || x.Voice
-				if !voice && a.Name == "document" {
-					a.Name = "audio.mp3"
-				}
+				audio = x
 			}
 		}
 
@@ -284,9 +283,18 @@ func userFile(media tg.MessageMediaClass) (bridge.Attachment, tg.InputFileLocati
 				a.Name = "video.mp4"
 			case voice:
 				a.Name = "voice.ogg"
+			case audio != nil:
+				a.Name = "audio.mp3"
 			}
 		}
 
+		if voice {
+			a.Voice = &bridge.Voice{}
+			if audio != nil {
+				a.Voice.Duration = audio.Duration
+				a.Voice.Waveform = unpackWaveform(audio.Waveform)
+			}
+		}
 		a.Animated = animated
 		return a, &tg.InputDocumentFileLocation{ID: d.ID, AccessHash: d.AccessHash, FileReference: d.FileReference}
 	case *tg.MessageMediaPhoto:
@@ -322,6 +330,20 @@ func userFile(media tg.MessageMediaClass) (bridge.Attachment, tg.InputFileLocati
 		}
 	}
 	return bridge.Attachment{}, nil
+}
+
+// Telegram stores little-endian 5-bit amplitudes; Discord expects one byte per sample.
+func unpackWaveform(packed []byte) []byte {
+	samples := make([]byte, len(packed)*8/5)
+	for i := range samples {
+		bit := i * 5
+		value := uint16(packed[bit/8]) >> (bit % 8)
+		if bit%8 > 3 {
+			value |= uint16(packed[bit/8+1]) << (8 - bit%8)
+		}
+		samples[i] = byte((value & 31) * 255 / 31)
+	}
+	return samples
 }
 
 type limitedMediaBuffer struct {

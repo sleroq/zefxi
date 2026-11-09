@@ -255,6 +255,7 @@ func messageFiles(m *models.Message) []incomingFile {
 
 	if f := m.Voice; f != nil {
 		add(f.FileID, "voice.ogg", f.MimeType, int64(f.FileSize))
+		files[len(files)-1].attachment.Voice = &bridge.Voice{Duration: f.Duration}
 	}
 	if f := m.VideoNote; f != nil {
 		add(f.FileID, "video-note.mp4", "video/mp4", int64(f.FileSize))

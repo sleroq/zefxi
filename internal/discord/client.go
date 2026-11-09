@@ -408,7 +408,24 @@ func (c *Client) prepareMessage(m bridge.OutboundMessage, bot bool) ([]string, [
 	return chunks, files, username, nil
 }
 
+func (c *Client) splitVoice(m *bridge.OutboundMessage) []bridge.Attachment {
+	var voices, other []bridge.Attachment
+	for _, a := range m.Attachments {
+		if a.Voice != nil && len(a.Data) > 0 && int64(len(a.Data)) <= c.maxUploadBytes && a.Size <= c.maxUploadBytes {
+			voices = append(voices, a)
+		} else {
+			other = append(other, a)
+		}
+	}
+	m.Attachments = other
+	return voices
+}
+
 func (c *Client) Send(ctx context.Context, m bridge.OutboundMessage) ([]string, error) {
+	voices := c.splitVoice(&m)
+	if len(voices) > 0 && m.Text == "" && len(m.Attachments) == 0 {
+		m.Text = "[Voice message]"
+	}
 	chunks, files, username, err := c.prepareMessage(m, m.ReplyTo != "")
 	if err != nil {
 		return nil, err
@@ -422,7 +439,53 @@ func (c *Client) Send(ctx context.Context, m bridge.OutboundMessage) ([]string, 
 		ids = append(ids, id)
 		files = nil
 	}
+	for _, voice := range voices {
+		id, err := c.sendVoice(ctx, voice)
+		if err != nil {
+			return ids, err
+		}
+		ids = append(ids, id)
+	}
 	return ids, nil
+}
+
+func (c *Client) sendVoice(ctx context.Context, a bridge.Attachment) (string, error) {
+	waveform := a.Voice.Waveform
+	if len(waveform) == 0 {
+		waveform = []byte{32, 64, 96, 128, 96, 64, 32, 64, 96, 128, 96, 64}
+	}
+	payload := struct {
+		Flags       discordgo.MessageFlags `json:"flags"`
+		Attachments []struct {
+			ID       int    `json:"id"`
+			Filename string `json:"filename"`
+			Duration int    `json:"duration_secs"`
+			Waveform []byte `json:"waveform"`
+		} `json:"attachments"`
+	}{Flags: discordgo.MessageFlagsIsVoiceMessage}
+	payload.Attachments = append(payload.Attachments, struct {
+		ID       int    `json:"id"`
+		Filename string `json:"filename"`
+		Duration int    `json:"duration_secs"`
+		Waveform []byte `json:"waveform"`
+	}{0, a.Name, a.Voice.Duration, waveform})
+	file := &discordgo.File{Name: a.Name, ContentType: a.ContentType, Reader: bytes.NewReader(a.Data)}
+	contentType, body, err := discordgo.MultipartBodyWithJSON(payload, []*discordgo.File{file})
+	if err != nil {
+		return "", err
+	}
+	endpoint := discordgo.EndpointChannelMessages(c.channelID)
+	response, err := c.session.RequestRaw(
+		http.MethodPost, endpoint, contentType, body, endpoint, 0, discordgo.WithContext(ctx),
+	)
+	if err != nil {
+		return "", errors.New("discord: send voice message failed")
+	}
+	var sent discordgo.Message
+	if err := json.Unmarshal(response, &sent); err != nil {
+		return "", err
+	}
+	return sent.ID, nil
 }
 
 func (c *Client) sendChunk(ctx context.Context, m bridge.OutboundMessage, name, content string, files []*discordgo.File) (string, error) {
@@ -526,6 +589,53 @@ func (c *Client) Edit(ctx context.Context, id string, m bridge.OutboundMessage) 
 
 // EditParts returns the IDs that still exist even when an operation fails.
 func (c *Client) EditParts(ctx context.Context, ids []string, m bridge.OutboundMessage) ([]string, error) {
+	voices := c.splitVoice(&m)
+
+	var ordinary, existingVoice []string
+	for i, id := range ids {
+		if i == 0 {
+			ordinary = append(ordinary, id)
+			continue
+		}
+		message, err := c.session.ChannelMessage(c.channelID, id, discordgo.WithContext(ctx))
+		if err != nil {
+			return ids, err
+		}
+		if message.Flags&discordgo.MessageFlagsIsVoiceMessage != 0 {
+			existingVoice = append(existingVoice, id)
+		} else {
+			ordinary = append(ordinary, id)
+		}
+	}
+	keepVoice := m.PreserveAttachments || len(voices) > 0
+	if keepVoice && len(existingVoice) > 0 && m.Text == "" && len(m.Attachments) == 0 {
+		m.Text = "[Voice message]"
+	}
+	ordinary, err := c.editOrdinaryParts(ctx, ordinary, m)
+	ids = slices.Concat(ordinary, existingVoice)
+	if err != nil {
+		return ids, err
+	}
+	if !keepVoice {
+		for len(ids) > len(ordinary) {
+			if err := c.Delete(ctx, ids[len(ids)-1]); err != nil {
+				return ids, err
+			}
+			ids = ids[:len(ids)-1]
+		}
+	} else if len(existingVoice) == 0 {
+		for _, voice := range voices {
+			id, err := c.sendVoice(ctx, voice)
+			if err != nil {
+				return ids, err
+			}
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+func (c *Client) editOrdinaryParts(ctx context.Context, ids []string, m bridge.OutboundMessage) ([]string, error) {
 	ids = slices.Clone(ids)
 
 	first, err := c.session.ChannelMessage(c.channelID, ids[0], discordgo.WithContext(ctx))

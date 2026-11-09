@@ -34,7 +34,13 @@ const (
 	StickerLottie StickerFormat = "lottie"
 )
 
+type Voice struct {
+	Duration int
+	Waveform []byte
+}
+
 type Attachment struct {
+	Voice         *Voice
 	Name          string
 	StickerFormat StickerFormat
 	ContentType   string
