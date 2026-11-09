@@ -424,7 +424,7 @@ func (c *Client) splitVoice(m *bridge.OutboundMessage) []bridge.Attachment {
 func (c *Client) Send(ctx context.Context, m bridge.OutboundMessage) ([]string, error) {
 	voices := c.splitVoice(&m)
 	if len(voices) > 0 && m.Text == "" && len(m.Attachments) == 0 {
-		m.Text = "[Voice message]"
+		m.Text = "[Voice message]:"
 	}
 	chunks, files, username, err := c.prepareMessage(m, m.ReplyTo != "")
 	if err != nil {
@@ -609,7 +609,7 @@ func (c *Client) EditParts(ctx context.Context, ids []string, m bridge.OutboundM
 	}
 	keepVoice := m.PreserveAttachments || len(voices) > 0
 	if keepVoice && len(existingVoice) > 0 && m.Text == "" && len(m.Attachments) == 0 {
-		m.Text = "[Voice message]"
+		m.Text = "[Voice message]:"
 	}
 	ordinary, err := c.editOrdinaryParts(ctx, ordinary, m)
 	ids = slices.Concat(ordinary, existingVoice)

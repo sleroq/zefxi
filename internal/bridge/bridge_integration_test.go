@@ -1041,3 +1041,51 @@ func TestTelegramDelete(t *testing.T) {
 		t.Fatalf("remaining links: %v, %v", links, err)
 	}
 }
+
+func TestTelegramForwardAttribution(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, db)
+
+	if err := db.RememberUser(ctx, bridge.Discord, bridge.User{ID: "9", Name: "Discord *Name*"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.LinkUsers(ctx, "42", "9"); err != nil {
+		t.Fatal(err)
+	}
+	dc := &discord{users: []bridge.User{{ID: "10", Username: "unlinked"}}}
+	b := bridge.New(db, &messenger{}, dc)
+	cases := []struct {
+		source bridge.ForwardSource
+		want   string
+	}{
+		{bridge.ForwardSource{User: bridge.User{ID: "42", Name: "Telegram"}}, `forwarded from "Discord \*Name\*"`},
+		{bridge.ForwardSource{User: bridge.User{ID: "43", Name: "@everyone [x]", Username: "unlinked"}}, "forwarded from \"@\u200beveryone \\[x\\]\""},
+		{bridge.ForwardSource{Name: "News", URL: "https://t.me/news"}, `forwarded from "[News](https://t.me/news)"`},
+	}
+	for i, tc := range cases {
+		msg := bridge.Message{
+			ID: fmt.Sprint(i), Author: bridge.User{Name: "Sender"}, Forward: &tc.source,
+			Text: richtext.Text{Value: "body"}, Attachments: []bridge.Attachment{{Name: "voice.ogg", Voice: &bridge.Voice{}}},
+		}
+		if err := b.HandleMessage(ctx, bridge.Telegram, msg); err != nil {
+			t.Fatal(err)
+		}
+		out := dc.messages[len(dc.messages)-1]
+		if out.Text != tc.want+"\nbody" || len(out.Attachments) != 1 || len(out.MentionIDs) != 0 {
+			t.Fatalf("out: %+v", out)
+		}
+		if err := b.HandleEdit(ctx, bridge.Telegram, msg); err != nil {
+			t.Fatal(err)
+		}
+		if got := dc.edits[len(dc.edits)-1].Text; got != out.Text {
+			t.Fatalf("edit %q", got)
+		}
+	}
+	if _, found, err := db.User(ctx, bridge.Telegram, "43"); err != nil || found {
+		t.Fatalf("forward source remembered: %v %v", found, err)
+	}
+}

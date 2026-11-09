@@ -187,6 +187,18 @@ func (b *Bridge) convertMessage(ctx context.Context, source Platform, msg Messag
 	var target Messenger
 	if source == Telegram {
 		out.Text = richtext.ToDiscord(msg.Text, resolve)
+		if msg.Forward != nil {
+			line, err := b.forwardAttribution(ctx, msg.Forward)
+			if err != nil {
+				return OutboundMessage{}, nil, err
+			}
+			if line != "" {
+				if out.Text != "" {
+					line += "\n" + out.Text
+				}
+				out.Text = line
+			}
+		}
 		target = b.discord
 	} else {
 		out.Text = richtext.ToTelegram(msg.Text, resolve)
@@ -197,6 +209,40 @@ func (b *Bridge) convertMessage(ctx context.Context, source Platform, msg Messag
 	}
 
 	return out, target, nil
+}
+
+func (b *Bridge) forwardAttribution(ctx context.Context, source *ForwardSource) (string, error) {
+	name := source.Name
+	if source.User.ID != "" {
+		linked, found, err := b.store.LinkedUser(ctx, Telegram, source.User.ID)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			name = linked.Name
+			if name == "" {
+				name = linked.Username
+			}
+		}
+	}
+	if name == "" {
+		name = source.User.Name
+	}
+	if name == "" {
+		name = source.User.Username
+	}
+	if name == "" {
+		name = source.User.ID
+	}
+	if name == "" {
+		return "", nil
+	}
+	name = strings.Join(strings.Fields(name), " ")
+	text := richtext.Text{Value: name}
+	if source.URL != "" {
+		text.Entities = []richtext.Entity{{Kind: "link", Start: 0, End: len(name), URL: source.URL}}
+	}
+	return "forwarded from \"" + richtext.ToDiscord(text, nil) + "\"", nil
 }
 
 func (b *Bridge) outboundAuthor(ctx context.Context, source Platform, author User) (User, string, error) {

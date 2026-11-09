@@ -52,10 +52,17 @@ type Attachment struct {
 	URL string
 }
 
+type ForwardSource struct {
+	User User
+	Name string
+	URL  string
+}
+
 type Message struct {
 	// ID is empty for events without a source message; these are not mapped.
 	ID                  string
 	Author              User
+	Forward             *ForwardSource
 	Text                richtext.Text
 	ReplyTo             string
 	Attachments         []Attachment

@@ -85,9 +85,10 @@ func (c *Client) forwardUserMessage(ctx context.Context, client *gotdtelegram.Cl
 		}
 		entities, emojis := userEntities(m.Entities)
 		msg := bridge.Message{
-			ID:     strconv.Itoa(m.ID),
-			Author: userAuthor(ctx, peers, e, m.FromID),
-			Text:   richtext.FromTelegram(m.Message, entities),
+			ID:      strconv.Itoa(m.ID),
+			Author:  userAuthor(ctx, peers, e, m.FromID),
+			Forward: userForwardSource(ctx, peers, e, &m.FwdFrom),
+			Text:    richtext.FromTelegram(m.Message, entities),
 		}
 		if r, ok := m.ReplyTo.(*tg.MessageReplyHeader); ok && r.ReplyToMsgID != 0 {
 			msg.ReplyTo = strconv.Itoa(r.ReplyToMsgID)
@@ -130,6 +131,40 @@ func (c *Client) forwardUserMessage(ctx context.Context, client *gotdtelegram.Cl
 	}
 	return nil
 }
+func userForwardSource(ctx context.Context, peers storage.PeerStorage, e tg.Entities, header *tg.MessageFwdHeader) *bridge.ForwardSource {
+	if header == nil {
+		return nil
+	}
+	switch p := header.FromID.(type) {
+	case *tg.PeerUser:
+		return &bridge.ForwardSource{User: userAuthor(ctx, peers, e, p)}
+	case *tg.PeerChat:
+		ch := e.Chats[p.ChatID]
+		if ch == nil && peers != nil {
+			if cached, err := peers.Find(ctx, storage.PeerKey{Kind: dialogs.Chat, ID: p.ChatID}); err == nil {
+				ch = cached.Chat
+			}
+		}
+		if ch != nil {
+			return &bridge.ForwardSource{Name: ch.Title}
+		}
+	case *tg.PeerChannel:
+		ch := e.Channels[p.ChannelID]
+		if ch == nil && peers != nil {
+			if cached, err := peers.Find(ctx, storage.PeerKey{Kind: dialogs.Channel, ID: p.ChannelID}); err == nil {
+				ch = cached.Channel
+			}
+		}
+		if ch != nil {
+			return &bridge.ForwardSource{Name: ch.Title, URL: publicChannelURL(ch.Username)}
+		}
+	}
+	if header.FromName != "" {
+		return &bridge.ForwardSource{Name: header.FromName}
+	}
+	return nil
+}
+
 func (c *Client) isOwnBot(p tg.PeerClass) bool {
 	u, ok := p.(*tg.PeerUser)
 	return ok && c.bot != nil && u.UserID == c.bot.ID()

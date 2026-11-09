@@ -380,7 +380,7 @@ func TestSendVoiceAndEditCaption(t *testing.T) {
 			c.session.Client = &http.Client{Transport: voiceTestTransport(t, reply)}
 
 			m := bridge.OutboundMessage{
-				Author: bridge.User{Name: "Alice"}, Text: "caption",
+				Author: bridge.User{Name: "Alice"}, Text: `forwarded from "Source"`,
 				Attachments: []bridge.Attachment{{
 					Name: "voice.ogg", ContentType: "audio/ogg", Data: []byte("audio"),
 					Voice: &bridge.Voice{Duration: 12, Waveform: []byte{0, 255}},
@@ -393,7 +393,8 @@ func TestSendVoiceAndEditCaption(t *testing.T) {
 			if err != nil || fmt.Sprint(ids) != "[caption voice]" {
 				t.Fatalf("send: %v %v", ids, err)
 			}
-			m.Text = "edited"
+			m.Text = `forwarded from "Source"
+edited`
 			m.Attachments = nil
 			m.PreserveAttachments = true
 			ids, err = c.EditParts(context.Background(), ids, m)
@@ -424,10 +425,10 @@ func voiceTestTransport(t *testing.T, reply bool) roundTripFunc {
 				t.Fatal(err)
 			}
 			if reply {
-				if p.Content != "Alice: caption" || p.Reference == nil || p.Reference.ID != "original" {
+				if p.Content != `Alice: forwarded from "Source"` || p.Reference == nil || p.Reference.ID != "original" {
 					t.Fatalf("reply: %+v", p)
 				}
-			} else if p.Content != "caption" || p.Username != "Alice" {
+			} else if p.Content != `forwarded from "Source"` || p.Username != "Alice" {
 				t.Fatalf("identity: %+v", p)
 			}
 			body = `{"id":"caption"}`

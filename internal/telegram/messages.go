@@ -55,7 +55,10 @@ func (c *Client) forwardMessage(ctx context.Context, m *models.Message, edit boo
 		converted = append(converted, entity)
 	}
 
-	msg := bridge.Message{ID: strconv.Itoa(m.ID), Author: user(m.From), Text: richtext.FromTelegram(value, converted)}
+	msg := bridge.Message{
+		ID: strconv.Itoa(m.ID), Author: user(m.From),
+		Forward: botForwardSource(m.ForwardOrigin), Text: richtext.FromTelegram(value, converted),
+	}
 	if m.ReplyToMessage != nil {
 		msg.ReplyTo = strconv.Itoa(m.ReplyToMessage.ID)
 	}
@@ -103,6 +106,45 @@ func (c *Client) forwardMessage(ctx context.Context, m *models.Message, edit boo
 		return c.handler.HandleEdit(ctx, bridge.Telegram, msg)
 	}
 	return c.handler.HandleMessage(ctx, bridge.Telegram, msg)
+}
+
+func botForwardSource(origin *models.MessageOrigin) *bridge.ForwardSource {
+	if origin == nil {
+		return nil
+	}
+	switch origin.Type {
+	case models.MessageOriginTypeUser:
+		if origin.MessageOriginUser != nil {
+			u := origin.MessageOriginUser.SenderUser
+			return &bridge.ForwardSource{User: user(&u)}
+		}
+	case models.MessageOriginTypeHiddenUser:
+		if origin.MessageOriginHiddenUser != nil {
+			return &bridge.ForwardSource{Name: origin.MessageOriginHiddenUser.SenderUserName}
+		}
+	case models.MessageOriginTypeChat:
+		if origin.MessageOriginChat != nil {
+			return &bridge.ForwardSource{Name: origin.MessageOriginChat.SenderChat.Title}
+		}
+	case models.MessageOriginTypeChannel:
+		if origin.MessageOriginChannel != nil {
+			ch := origin.MessageOriginChannel.Chat
+			return &bridge.ForwardSource{Name: ch.Title, URL: publicChannelURL(ch.Username)}
+		}
+	}
+	return nil
+}
+
+func publicChannelURL(username string) string {
+	if username == "" {
+		return ""
+	}
+	for _, r := range username {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return ""
+		}
+	}
+	return "https://t.me/" + username
 }
 
 func soleCustomEmoji(text string, entities []models.MessageEntity) string {
