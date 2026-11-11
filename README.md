@@ -2,7 +2,7 @@
 
 Zefxi bridges a Telegram supergroup to one Discord channel
 
-This project exists because [Matterbridge wasn't good enough for me.](#Features-comparison)
+This project exists because [Matterbridge wasn't good enough for me.](#features-comparison-20261009)
 
 ## Features
 
