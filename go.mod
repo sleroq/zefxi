@@ -6,11 +6,11 @@ require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/go-telegram/bot v1.27.0
 	github.com/gotd/contrib v0.25.0
-	github.com/gotd/td v0.161.0
+	github.com/gotd/td v0.163.0
 	github.com/mattn/go-sqlite3 v1.14.53
-	github.com/yeqown/go-qrcode/v2 v2.2.5
+	github.com/yeqown/go-qrcode/v2 v2.3.0
 	go.etcd.io/bbolt v1.5.0
-	golang.org/x/term v0.45.0
+	golang.org/x/term v0.47.0
 )
 
 require (
@@ -21,7 +21,7 @@ require (
 	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/ghodss/yaml v1.0.0 // indirect
-	github.com/go-faster/errors v0.7.1 // indirect
+	github.com/go-faster/errors v0.8.0 // indirect
 	github.com/go-faster/jx v1.2.0 // indirect
 	github.com/go-faster/xor v1.0.0 // indirect
 	github.com/go-faster/yaml v0.4.6 // indirect
@@ -30,15 +30,15 @@ require (
 	github.com/gotd/ige v0.3.0 // indirect
 	github.com/gotd/log v0.1.0 // indirect
 	github.com/gotd/neo v0.1.5 // indirect
-	github.com/klauspost/compress v1.19.0 // indirect
-	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/ogen-go/ogen v1.23.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/yeqown/reedsolomon v1.0.0 // indirect
-	github.com/yuin/goldmark v1.8.4 // indirect
+	github.com/yuin/goldmark v1.8.5 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
@@ -50,7 +50,7 @@ require (
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
